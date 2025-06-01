@@ -60,6 +60,8 @@ def main():
                        help='Concatenate embeddings for hybrid models; disable to only use square patches')
     parser.add_argument('--qdrant-url', default='http://localhost:6333',
                        help='QDrant server URL (default: http://localhost:6333, set to "none" to disable)')
+    parser.add_argument('--force', action='store_true',
+                       help='Force recomputation of all tracks, ignoring existing data')
 
     args = parser.parse_args()
 
@@ -108,13 +110,14 @@ def main():
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
         stored_count = 0
 
-        def progress_callback(filename, success, result_or_error, audio_hash=None):
+        def progress_callback(filename, success, result_or_error, audio_hash, mean_energy):
             nonlocal stored_count
             if result_or_error == "skipped":
                 tqdm.write(f'⏭ {filename}: already processed (hash match)')
             else:
                 embeddings = result_or_error
-                tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}')
+                energy_info = f" (energy: {mean_energy:.3f})" if mean_energy is not None else ""
+                tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}{energy_info}')
 
                 # Store in vector database if enabled
                 if vector_store:
@@ -125,7 +128,7 @@ def main():
                             full_path = audio_file
                             break
 
-                    vector_store.store_track(full_path, embeddings, audio_hash)
+                    vector_store.store_track(full_path, embeddings, audio_hash, mean_energy)
                     stored_count += 1
                     tqdm.write(f'  → Stored in vector database')
             progress_bar.update(1)
@@ -139,7 +142,7 @@ def main():
         profiler = cProfile.Profile()
         profiler.enable()
 
-        results = inference.process_folder(args.folder, vector_store, progress_callback, audio_files=audio_files)
+        results = inference.process_folder(args.folder, vector_store, progress_callback, audio_files=audio_files, force=args.force)
 
         profiler.disable()
         progress_bar.close()

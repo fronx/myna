@@ -9,15 +9,17 @@ import torchaudio
 import torchaudio.transforms as T
 import librosa
 from nnAudio.features.mel import MelSpectrogram
+import essentia.standard as es
+from statistics import mean
 
 
 def get_audio_info(filename: str):
     """
     Get audio file metadata without loading the audio.
-    
+
     Args:
         filename: Path to audio file
-        
+
     Returns:
         tuple: (sample_rate, num_frames)
     """
@@ -42,7 +44,7 @@ def get_audio_info(filename: str):
             return sr, estimated_frames
 
 
-def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False, 
+def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
                    start_frame: int = None, num_frames: int = None):
     """
     Load audio file and return raw audio tensor.
@@ -58,13 +60,13 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
         torch.Tensor: Raw audio tensor of shape (samples,)
     """
     import time
-    
+
     if profile:
         decode_start = time.perf_counter()
-    
+
     try:
         # Try torchaudio first
-        signal, sr = torchaudio.load(filename, frame_offset=start_frame or 0, 
+        signal, sr = torchaudio.load(filename, frame_offset=start_frame or 0,
                                    num_frames=num_frames or -1)
         if profile:
             decode_time = time.perf_counter() - decode_start
@@ -75,8 +77,8 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
         # Note: librosa offset/duration are in seconds, not frames
         offset_sec = (start_frame / target_sr) if start_frame else 0
         duration_sec = (num_frames / target_sr) if num_frames else None
-        
-        signal_np, sr = librosa.load(filename, sr=None, mono=False, 
+
+        signal_np, sr = librosa.load(filename, sr=None, mono=False,
                                    offset=offset_sec, duration=duration_sec)
         if profile:
             decode_time = time.perf_counter() - decode_start
@@ -108,7 +110,7 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
     if sr != target_sr:
         resampler = T.Resample(orig_freq=sr, new_freq=target_sr)
         signal = resampler(signal)
-        
+
         if profile:
             resample_time = time.perf_counter() - resample_start
             print(f"    Resampling {sr}→{target_sr}Hz: {resample_time:.3f}s")
@@ -178,3 +180,12 @@ def get_audio_files(folder_path: str):
         audio_files.extend(glob.glob(os.path.join(folder_path, ext.upper())))
 
     return sorted(audio_files)
+
+
+def extract_mean_energy(audio_segments: list, energy_extractor: es.Energy) -> float:
+    """Extract mean energy per sample from audio segments using Essentia."""
+    normalized_energies = (
+        energy_extractor(segment.cpu().numpy().astype('float32')) / len(segment)
+        for segment in audio_segments
+    )
+    return mean(normalized_energies)
