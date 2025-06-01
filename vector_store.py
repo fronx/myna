@@ -1,0 +1,244 @@
+"""
+QDrant vector store for Myna embeddings
+"""
+
+import os
+import hashlib
+from typing import Dict, List, Optional, Tuple, Union
+from pathlib import Path
+import numpy as np
+import torch
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from mutagen import File as MutagenFile
+
+
+class MynaVectorStore:
+    """QDrant vector store for Myna embeddings"""
+    
+    def __init__(self, collection_name: str = "myna_embeddings", 
+                 url: Optional[str] = None, db_path: str = ".myna_vector_db"):
+        """
+        Initialize QDrant vector store.
+        
+        Args:
+            collection_name: Name of the QDrant collection
+            url: QDrant server URL (if None, uses local storage)
+            db_path: Local database path when url is None
+        """
+        self.collection_name = collection_name
+        
+        if url:
+            self.client = QdrantClient(url=url)
+        else:
+            self.client = QdrantClient(path=db_path)
+        
+        self._ensure_collection()
+    
+    def _ensure_collection(self):
+        """Create collection if it doesn't exist"""
+        collections = self.client.get_collections().collections
+        collection_names = [c.name for c in collections]
+        
+        if self.collection_name not in collection_names:
+            # Myna embeddings are 768-dimensional
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=768,
+                    distance=Distance.COSINE
+                )
+            )
+            print(f"Created collection: {self.collection_name}")
+    
+    def _extract_metadata(self, file_path: str) -> Dict:
+        """Extract metadata from audio file"""
+        metadata = {"file_path": file_path, "filename": os.path.basename(file_path)}
+        
+        try:
+            audio_file = MutagenFile(file_path)
+            if audio_file is not None:
+                # Extract common tags
+                metadata.update({
+                    "title": self._get_tag(audio_file, "TIT2", "TITLE"),
+                    "artist": self._get_tag(audio_file, "TPE1", "ARTIST"),
+                    "album": self._get_tag(audio_file, "TALB", "ALBUM"),
+                    "genre": self._get_tag(audio_file, "TCON", "GENRE"),
+                    "year": self._get_tag(audio_file, "TDRC", "DATE"),
+                    "duration": getattr(audio_file.info, 'length', 0),
+                    "bitrate": getattr(audio_file.info, 'bitrate', 0),
+                })
+        except Exception as e:
+            print(f"Warning: Could not extract metadata from {file_path}: {e}")
+        
+        return metadata
+    
+    def _get_tag(self, audio_file, *tag_names):
+        """Get tag value from audio file, trying multiple tag formats"""
+        for tag_name in tag_names:
+            if tag_name in audio_file:
+                value = audio_file[tag_name]
+                if isinstance(value, list) and value:
+                    return str(value[0])
+                return str(value)
+        return ""
+    
+    def _create_file_hash(self, file_path: str) -> str:
+        """Create hash of file for deduplication"""
+        stat = os.stat(file_path)
+        # Hash based on file path, size, and modification time
+        hash_input = f"{file_path}_{stat.st_size}_{stat.st_mtime}"
+        return hashlib.md5(hash_input.encode()).hexdigest()
+    
+    def _average_embeddings(self, embeddings: torch.Tensor) -> np.ndarray:
+        """
+        Average multiple embeddings from strategic sampling into single vector.
+        
+        Args:
+            embeddings: Tensor of shape (num_samples, embedding_dim)
+            
+        Returns:
+            np.ndarray: Averaged embedding vector
+        """
+        if embeddings.dim() == 2:
+            # Multiple samples - average them
+            return embeddings.mean(dim=0).cpu().numpy()
+        else:
+            # Single sample
+            return embeddings.cpu().numpy()
+    
+    def store_track(self, file_path: str, embeddings: torch.Tensor, 
+                   metadata: Optional[Dict] = None) -> str:
+        """
+        Store track embeddings and metadata.
+        
+        Args:
+            file_path: Path to audio file
+            embeddings: Myna embeddings tensor
+            metadata: Optional additional metadata
+            
+        Returns:
+            str: Point ID in QDrant
+        """
+        # Create unique ID based on file
+        point_id = self._create_file_hash(file_path)
+        
+        # Extract metadata
+        track_metadata = self._extract_metadata(file_path)
+        if metadata:
+            track_metadata.update(metadata)
+        
+        # Average embeddings if multiple samples
+        embedding_vector = self._average_embeddings(embeddings)
+        
+        # Store in QDrant
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=[
+                PointStruct(
+                    id=point_id,
+                    vector=embedding_vector.tolist(),
+                    payload=track_metadata
+                )
+            ]
+        )
+        
+        return point_id
+    
+    def find_similar(self, file_path: str = None, embeddings: torch.Tensor = None,
+                    limit: int = 10, score_threshold: float = 0.7) -> List[Dict]:
+        """
+        Find similar tracks.
+        
+        Args:
+            file_path: Path to query audio file (if stored)
+            embeddings: Query embeddings tensor (alternative to file_path)
+            limit: Number of results to return
+            score_threshold: Minimum similarity score
+            
+        Returns:
+            List of similar tracks with metadata and scores
+        """
+        if file_path:
+            # Search by stored track
+            query_id = self._create_file_hash(file_path)
+            query_vector = None
+        elif embeddings is not None:
+            # Search by embedding vector
+            query_id = None
+            query_vector = self._average_embeddings(embeddings).tolist()
+        else:
+            raise ValueError("Either file_path or embeddings must be provided")
+        
+        if query_vector:
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                score_threshold=score_threshold
+            )
+        else:
+            # Get the stored point first
+            points = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[query_id],
+                with_vectors=True
+            )
+            
+            if not points:
+                raise ValueError(f"Track not found: {file_path}")
+            
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=points[0].vector,
+                limit=limit + 1,  # +1 to exclude self
+                score_threshold=score_threshold
+            )
+            
+            # Remove the query track itself
+            results = [r for r in results if r.id != query_id][:limit]
+        
+        # Format results
+        similar_tracks = []
+        for result in results:
+            track_info = {
+                "id": result.id,
+                "score": result.score,
+                "metadata": result.payload
+            }
+            similar_tracks.append(track_info)
+        
+        return similar_tracks
+    
+    def get_track_info(self, file_path: str) -> Optional[Dict]:
+        """Get stored track information"""
+        track_id = self._create_file_hash(file_path)
+        points = self.client.retrieve(
+            collection_name=self.collection_name,
+            ids=[track_id],
+            with_payload=True
+        )
+        
+        if points:
+            return points[0].payload
+        return None
+    
+    def delete_track(self, file_path: str) -> bool:
+        """Delete track from vector store"""
+        track_id = self._create_file_hash(file_path)
+        result = self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=[track_id]
+        )
+        return result.operation_id is not None
+    
+    def collection_info(self) -> Dict:
+        """Get collection statistics"""
+        info = self.client.get_collection(self.collection_name)
+        return {
+            "name": self.collection_name,
+            "vector_size": info.config.params.vectors.size,
+            "distance": info.config.params.vectors.distance,
+            "points_count": info.points_count,
+            "status": info.status
+        }

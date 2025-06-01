@@ -1,5 +1,6 @@
 pretrained/
 venv/
+qdrant_data/
 
 CLAUDE.md
 settings.local.json

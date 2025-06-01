@@ -12,3 +12,5 @@ torchaudio
 matplotlib
 soundfile
 librosa
+qdrant-client>=1.6.4
+mutagen>=1.47.0

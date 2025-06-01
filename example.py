@@ -3,8 +3,50 @@ Minimal script example for model inference
 """
 
 import argparse
+import subprocess
 from tqdm import tqdm
 from myna_inference import MynaInference
+from vector_store import MynaVectorStore
+from qdrant_utils import is_qdrant_running, wait_for_qdrant
+
+
+def prompt_qdrant_install() -> bool:
+    """Ask user if they want to install QDrant as a service"""
+    print("\n🔍 QDrant vector database is not running.")
+    print("QDrant enables:")
+    print("  • Storing music embeddings permanently")
+    print("  • Finding similar tracks across your collection")
+    print("  • Building music recommendation systems")
+    print("  • Data visualization and analysis")
+    
+    while True:
+        response = input("\nWould you like to install QDrant as a startup service? (y/n): ").lower().strip()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print("Please enter 'y' for yes or 'n' for no.")
+
+
+def install_qdrant_service() -> bool:
+    """Install QDrant service and return success status"""
+    print("\n🚀 Installing QDrant service...")
+    try:
+        result = subprocess.run(
+            ["python", "install_qdrant_service.py"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        print("✅ QDrant service installed successfully!")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install QDrant service: {e.stderr}")
+        return False
+    except FileNotFoundError:
+        print("❌ install_qdrant_service.py not found")
+        return False
 
 
 def main():
@@ -16,6 +58,8 @@ def main():
                        help='Model type')
     parser.add_argument('--hybrid-mode', action='store_true', default=True,
                        help='Concatenate embeddings for hybrid models; disable to only use square patches')
+    parser.add_argument('--qdrant-url', default='http://localhost:6333',
+                       help='QDrant server URL (default: http://localhost:6333, set to "none" to disable)')
 
     args = parser.parse_args()
 
@@ -25,15 +69,67 @@ def main():
         hybrid_mode=args.hybrid_mode
     )
 
+    # Initialize vector store unless explicitly disabled
+    vector_store = None
+    if args.qdrant_url.lower() != 'none':
+        # Check if QDrant is running
+        if not is_qdrant_running(args.qdrant_url):
+            # Only prompt for localhost (not remote servers)
+            if args.qdrant_url == 'http://localhost:6333':
+                if prompt_qdrant_install():
+                    if install_qdrant_service():
+                        # Give QDrant a moment to start
+                        wait_for_qdrant(args.qdrant_url, timeout=10)
+                    else:
+                        print("Proceeding without vector storage...")
+                        args.qdrant_url = 'none'
+                else:
+                    print("Proceeding without vector storage...")
+                    args.qdrant_url = 'none'
+            else:
+                print(f"Warning: Could not connect to QDrant at {args.qdrant_url}")
+                print("Proceeding without vector storage...")
+                args.qdrant_url = 'none'
+        
+        # Try to connect to QDrant
+        if args.qdrant_url.lower() != 'none':
+            try:
+                vector_store = MynaVectorStore(url=args.qdrant_url)
+                print(f"Vector store initialized: {vector_store.collection_info()}")
+            except Exception as e:
+                print(f"Warning: Could not connect to QDrant at {args.qdrant_url}: {e}")
+                print("Proceeding without vector storage...")
+                vector_store = None
+
     try:
         audio_files = inference.get_audio_files(args.folder)
         print(f"Found {len(audio_files)} audio files in {args.folder}")
 
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
+        stored_count = 0
 
         def progress_callback(filename, success, result_or_error):
+            nonlocal stored_count
             if success:
-                tqdm.write(f'✓ {filename}: embeddings shape {result_or_error.shape}')
+                embeddings = result_or_error
+                tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}')
+                
+                # Store in vector database if enabled
+                if vector_store:
+                    try:
+                        # Get full file path for the file we just processed
+                        full_path = None
+                        for audio_file in audio_files:
+                            if audio_file.endswith(filename):
+                                full_path = audio_file
+                                break
+                        
+                        if full_path:
+                            vector_store.store_track(full_path, embeddings)
+                            stored_count += 1
+                            tqdm.write(f'  → Stored in vector database')
+                    except Exception as e:
+                        tqdm.write(f'  ✗ Failed to store in vector database: {e}')
             else:
                 tqdm.write(f'✗ {filename}: {result_or_error}')
             progress_bar.update(1)
@@ -41,7 +137,12 @@ def main():
         results = inference.process_folder(args.folder, progress_callback)
         progress_bar.close()
 
-        print(f"\nProcessed {len([r for r in results.values() if r is not None])} files successfully")
+        successful_files = len([r for r in results.values() if r is not None])
+        print(f"\nProcessed {successful_files} files successfully")
+        
+        if vector_store:
+            print(f"Stored {stored_count} embeddings in vector database")
+            print(f"Collection info: {vector_store.collection_info()}")
 
     except ValueError as e:
         print(e)
