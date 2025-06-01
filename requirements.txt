@@ -8,3 +8,7 @@ torchvision>=0.15.1
 tqdm>=4.66.5
 vit_pytorch>=1.6.5
 wandb>=0.14.0
+torchaudio
+matplotlib
+soundfile
+librosa
