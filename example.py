@@ -108,33 +108,29 @@ def main():
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
         stored_count = 0
 
-        def progress_callback(filename, success, result_or_error):
+        def progress_callback(filename, success, result_or_error, audio_hash=None):
             nonlocal stored_count
-            if success:
+            if result_or_error == "skipped":
+                tqdm.write(f'⏭ {filename}: already processed (hash match)')
+            else:
                 embeddings = result_or_error
                 tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}')
                 
                 # Store in vector database if enabled
                 if vector_store:
-                    try:
-                        # Get full file path for the file we just processed
-                        full_path = None
-                        for audio_file in audio_files:
-                            if audio_file.endswith(filename):
-                                full_path = audio_file
-                                break
-                        
-                        if full_path:
-                            vector_store.store_track(full_path, embeddings)
-                            stored_count += 1
-                            tqdm.write(f'  → Stored in vector database')
-                    except Exception as e:
-                        tqdm.write(f'  ✗ Failed to store in vector database: {e}')
-            else:
-                tqdm.write(f'✗ {filename}: {result_or_error}')
+                    # Get full file path for the file we just processed
+                    full_path = None
+                    for audio_file in audio_files:
+                        if audio_file.endswith(filename):
+                            full_path = audio_file
+                            break
+                    
+                    vector_store.store_track(full_path, embeddings, audio_hash)
+                    stored_count += 1
+                    tqdm.write(f'  → Stored in vector database')
             progress_bar.update(1)
 
-        results = inference.process_folder(args.folder, progress_callback)
+        results = inference.process_folder(args.folder, vector_store, progress_callback)
         progress_bar.close()
 
         successful_files = len([r for r in results.values() if r is not None])

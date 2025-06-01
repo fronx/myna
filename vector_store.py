@@ -93,6 +93,7 @@ class MynaVectorStore:
         hash_input = f"{file_path}_{stat.st_size}_{stat.st_mtime}"
         return hashlib.md5(hash_input.encode()).hexdigest()
     
+    
     def _average_embeddings(self, embeddings: torch.Tensor) -> np.ndarray:
         """
         Average multiple embeddings from strategic sampling into single vector.
@@ -111,13 +112,14 @@ class MynaVectorStore:
             return embeddings.cpu().numpy()
     
     def store_track(self, file_path: str, embeddings: torch.Tensor, 
-                   metadata: Optional[Dict] = None) -> str:
+                   audio_hash: str, metadata: Optional[Dict] = None) -> str:
         """
         Store track embeddings and metadata.
         
         Args:
             file_path: Path to audio file
             embeddings: Myna embeddings tensor
+            audio_hash: Hash of the audio samples used for embedding generation
             metadata: Optional additional metadata
             
         Returns:
@@ -130,6 +132,9 @@ class MynaVectorStore:
         track_metadata = self._extract_metadata(file_path)
         if metadata:
             track_metadata.update(metadata)
+        
+        # Add audio sample hash
+        track_metadata["audio_sample_hash"] = audio_hash
         
         # Average embeddings if multiple samples
         embedding_vector = self._average_embeddings(embeddings)
@@ -234,6 +239,31 @@ class MynaVectorStore:
             points_selector=[track_id]
         )
         return result.operation_id is not None
+    
+    def needs_reprocessing(self, file_path: str, current_audio_hash: str) -> bool:
+        """
+        Check if a file needs reprocessing by comparing audio content hashes.
+        
+        Args:
+            file_path: Path to audio file
+            current_audio_hash: Current hash of the audio samples
+            
+        Returns:
+            bool: True if file needs reprocessing, False if already up-to-date
+        """
+        track_info = self.get_track_info(file_path)
+        
+        if not track_info:
+            # No existing data, needs processing
+            return True
+        
+        stored_audio_hash = track_info.get("audio_sample_hash")
+        if not stored_audio_hash:
+            # No hash stored, needs reprocessing
+            return True
+            
+        # Compare audio content hashes
+        return stored_audio_hash != current_audio_hash
     
     def collection_info(self) -> Dict:
         """Get collection statistics"""
