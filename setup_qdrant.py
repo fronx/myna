@@ -22,8 +22,8 @@ def start_qdrant_docker():
     """Start QDrant using Docker"""
     print("Starting QDrant with Docker...")
     
-    # Create data directory
-    data_dir = Path.cwd() / "qdrant_data"
+    # Create data directory in user's home
+    data_dir = Path.home() / ".qdrant_data"
     data_dir.mkdir(exist_ok=True)
     
     cmd = [
@@ -92,8 +92,8 @@ def start_qdrant_binary(binary_path: Path):
     """Start QDrant using downloaded binary"""
     print("Starting QDrant binary...")
     
-    # Create data directory
-    data_dir = Path.cwd() / "qdrant_data"
+    # Create data directory in user's home
+    data_dir = Path.home() / ".qdrant_data"
     data_dir.mkdir(exist_ok=True)
     
     cmd = [

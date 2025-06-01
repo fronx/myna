@@ -54,8 +54,8 @@ def setup_docker_service():
     """Setup QDrant using Docker with restart policy"""
     print("Setting up QDrant with Docker...")
     
-    # Create data directory
-    data_dir = Path.cwd() / "qdrant_data"
+    # Create data directory in user's home
+    data_dir = Path.home() / ".qdrant_data"
     data_dir.mkdir(exist_ok=True)
     
     # Stop and remove existing container
@@ -120,8 +120,8 @@ def setup_binary_service(binary_path: Path):
     """Setup QDrant binary as launchd service"""
     print("Setting up QDrant as macOS service...")
     
-    # Create data directory
-    data_dir = Path.cwd() / "qdrant_data"
+    # Create data directory in user's home
+    data_dir = Path.home() / ".qdrant_data"
     data_dir.mkdir(exist_ok=True)
     
     # Create launchd plist

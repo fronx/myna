@@ -17,20 +17,23 @@ class MynaVectorStore:
     """QDrant vector store for Myna embeddings"""
     
     def __init__(self, collection_name: str = "myna_embeddings", 
-                 url: Optional[str] = None, db_path: str = ".myna_vector_db"):
+                 url: Optional[str] = None, db_path: Optional[str] = None):
         """
         Initialize QDrant vector store.
         
         Args:
             collection_name: Name of the QDrant collection
             url: QDrant server URL (if None, uses local storage)
-            db_path: Local database path when url is None
+            db_path: Local database path when url is None (defaults to ~/.qdrant_data)
         """
         self.collection_name = collection_name
         
         if url:
             self.client = QdrantClient(url=url)
         else:
+            if db_path is None:
+                from pathlib import Path
+                db_path = str(Path.home() / ".qdrant_data")
             self.client = QdrantClient(path=db_path)
         
         self._ensure_collection()

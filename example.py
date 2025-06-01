@@ -7,7 +7,7 @@ import subprocess
 from tqdm import tqdm
 from myna_inference import MynaInference
 from vector_store import MynaVectorStore
-from qdrant_utils import is_qdrant_running, wait_for_qdrant
+from qdrant_utils import is_qdrant_running, wait_for_qdrant, migrate_qdrant_data
 
 
 def prompt_qdrant_install() -> bool:
@@ -62,6 +62,9 @@ def main():
                        help='QDrant server URL (default: http://localhost:6333, set to "none" to disable)')
 
     args = parser.parse_args()
+
+    # Check for data migration before proceeding
+    migrate_qdrant_data()
 
     inference = MynaInference(
         model_path=args.model_path,
