@@ -19,6 +19,15 @@ Feel free to download and use these models for your tasks.
 To get started with inference, you can refer to the minimal example provided in the script [example.py](https://github.com/ghost-signal/myna/blob/main/example.py).
 
 
+## Setup
+
+```
+python -m venv venv
+. venv/bin/activate
+pip install -r requirements.txt
+```
+
+
 ## Citation
 
 If you use this code or the models in your research, please cite our work:
