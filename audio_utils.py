@@ -11,23 +11,77 @@ import librosa
 from nnAudio.features.mel import MelSpectrogram
 
 
-def load_raw_audio(filename: str, target_sr: int = 16000):
+def get_audio_info(filename: str):
+    """
+    Get audio file metadata without loading the audio.
+    
+    Args:
+        filename: Path to audio file
+        
+    Returns:
+        tuple: (sample_rate, num_frames)
+    """
+    try:
+        # Try torchaudio first
+        info = torchaudio.info(filename)
+        return info.sample_rate, info.num_frames
+    except RuntimeError:
+        # Fallback to librosa for MP3 files
+        import soundfile as sf
+        try:
+            with sf.SoundFile(filename) as f:
+                return f.samplerate, len(f)
+        except:
+            # Last resort: use librosa (slower but works for more formats)
+            y, sr = librosa.load(filename, sr=None, duration=0.1)  # Load tiny sample
+            # Estimate total frames
+            import os
+            file_size = os.path.getsize(filename)
+            # Rough estimate based on sample
+            estimated_frames = int(file_size / (len(y) * 4) * len(y) / 0.1)
+            return sr, estimated_frames
+
+
+def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False, 
+                   start_frame: int = None, num_frames: int = None):
     """
     Load audio file and return raw audio tensor.
 
     Args:
         filename: Path to audio file
         target_sr: Target sample rate (default: 16000)
+        profile: Whether to output timing information
+        start_frame: Optional start frame for partial loading
+        num_frames: Optional number of frames to load
 
     Returns:
         torch.Tensor: Raw audio tensor of shape (samples,)
     """
+    import time
+    
+    if profile:
+        decode_start = time.perf_counter()
+    
     try:
         # Try torchaudio first
-        signal, sr = torchaudio.load(filename)
+        signal, sr = torchaudio.load(filename, frame_offset=start_frame or 0, 
+                                   num_frames=num_frames or -1)
+        if profile:
+            decode_time = time.perf_counter() - decode_start
+            frames_info = f" ({num_frames} frames)" if num_frames else ""
+            print(f"    Torchaudio decode{frames_info}: {decode_time:.3f}s")
     except RuntimeError:
         # Fallback to librosa for MP3 files
-        signal_np, sr = librosa.load(filename, sr=None, mono=False)
+        # Note: librosa offset/duration are in seconds, not frames
+        offset_sec = (start_frame / target_sr) if start_frame else 0
+        duration_sec = (num_frames / target_sr) if num_frames else None
+        
+        signal_np, sr = librosa.load(filename, sr=None, mono=False, 
+                                   offset=offset_sec, duration=duration_sec)
+        if profile:
+            decode_time = time.perf_counter() - decode_start
+            frames_info = f" ({num_frames} frames)" if num_frames else ""
+            print(f"    Librosa decode{frames_info}: {decode_time:.3f}s")
 
         # Convert to torch tensor and ensure proper shape
         if signal_np.ndim == 1:
@@ -35,14 +89,29 @@ def load_raw_audio(filename: str, target_sr: int = 16000):
         else:
             signal = torch.from_numpy(signal_np)
 
+    if profile:
+        mono_start = time.perf_counter()
+
     # make mono if necessary
     if signal.shape[0] > 1:
         signal = signal.mean(dim=0, keepdim=True)
+
+    if profile:
+        mono_time = time.perf_counter() - mono_start
+        if mono_time > 0.001:  # Only print if significant
+            print(f"    Mono conversion: {mono_time:.3f}s")
+
+    if profile:
+        resample_start = time.perf_counter()
 
     # resample to target sample rate
     if sr != target_sr:
         resampler = T.Resample(orig_freq=sr, new_freq=target_sr)
         signal = resampler(signal)
+        
+        if profile:
+            resample_time = time.perf_counter() - resample_start
+            print(f"    Resampling {sr}→{target_sr}Hz: {resample_time:.3f}s")
 
     # Return mono audio tensor
     return signal.squeeze(0)

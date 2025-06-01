@@ -103,7 +103,13 @@ def main():
 
     try:
         audio_files = inference.get_audio_files(args.folder)
-        print(f"Found {len(audio_files)} audio files in {args.folder}")
+        
+        # Limit to 25 files for profiling
+        if len(audio_files) > 25:
+            audio_files = audio_files[:25]
+            print(f"Found {len(inference.get_audio_files(args.folder))} audio files, profiling first 25 in {args.folder}")
+        else:
+            print(f"Found {len(audio_files)} audio files in {args.folder}")
 
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
         stored_count = 0
@@ -130,8 +136,29 @@ def main():
                     tqdm.write(f'  → Stored in vector database')
             progress_bar.update(1)
 
-        results = inference.process_folder(args.folder, vector_store, progress_callback)
+        # Add profiling to identify bottlenecks in reprocessing check
+        import cProfile
+        import pstats
+        import io
+        
+        print("\n🔍 Profiling to identify preprocessing bottlenecks...")
+        profiler = cProfile.Profile()
+        profiler.enable()
+        
+        results = inference.process_folder(args.folder, vector_store, progress_callback, audio_files=audio_files)
+        
+        profiler.disable()
         progress_bar.close()
+        
+        # Show top time-consuming functions
+        s = io.StringIO()
+        ps = pstats.Stats(profiler, stream=s)
+        ps.sort_stats('cumulative')
+        ps.print_stats(10)  # Top 10 functions
+        
+        print("\n📊 TOP 10 FUNCTIONS BY TIME:")
+        print("="*50)
+        print(s.getvalue())
 
         successful_files = len([r for r in results.values() if r is not None])
         print(f"\nProcessed {successful_files} files successfully")

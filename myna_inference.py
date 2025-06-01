@@ -8,7 +8,7 @@ import torch
 
 from utils import get_n_frames, load_model
 from vit import SimpleViT
-from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio
+from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info
 from nnAudio.features.mel import MelSpectrogram
 
 
@@ -95,31 +95,50 @@ class MynaInference:
         hasher.update(samples_bytes)
         return hasher.hexdigest()
 
-    def _preprocess_audio(self, audio_file: str):
+    def _preprocess_audio(self, audio_file: str, profile: bool = False):
         """
         Preprocess audio file by extracting strategic segments and computing spectrograms.
 
         Args:
             audio_file: Path to audio file
+            profile: Whether to output timing information
 
         Returns:
             tuple: (spectrogram_samples, audio_hash)
         """
-        audio = load_raw_audio(audio_file, self.sample_rate)
-
-        # Extract strategic segments (15%, 35%, 55%, 75% of track)
-        audio_length = audio.shape[0]
-        segment_positions = [0.15, 0.35, 0.55, 0.75]
+        import time
         
-        # For each position, extract enough audio to ensure we can get n_samples
-        # We'll extract a bit more and let sample_spectrogram handle the sampling
-        extract_duration = max(self.n_samples, int(0.1 * audio_length))  # At least n_samples, or 10% of track
+        if profile:
+            total_start = time.perf_counter()
+            print(f"\nProfiling preprocessing for: {os.path.basename(audio_file)}")
+            
+        # Audio loading
+        if profile:
+            start_time = time.perf_counter()
+            
+        # Get audio info without loading full file
+        original_sr, total_frames = get_audio_info(audio_file)
+        
+        if profile:
+            info_time = time.perf_counter() - start_time
+            print(f"  Audio info: {info_time:.3f}s")
+        
+        # Calculate segment positions and sizes
+        segment_positions = [0.15, 0.35, 0.55, 0.75]
+        extract_duration_samples = max(self.n_samples, int(0.1 * total_frames))
+        
+        if profile:
+            mel_start = time.perf_counter()
         
         segment_spectrograms = []
         for position in segment_positions:
-            start_sample = int(position * audio_length)
-            end_sample = min(start_sample + extract_duration, audio_length)
-            segment = audio[start_sample:end_sample]
+            # Calculate segment boundaries in original sample rate
+            start_frame = int(position * total_frames)
+            num_frames = min(extract_duration_samples, total_frames - start_frame)
+            
+            # Load only this segment
+            segment = load_raw_audio(audio_file, self.sample_rate, profile=profile,
+                                   start_frame=start_frame, num_frames=num_frames)
 
             # Convert to mel spectrogram (this will have variable frames)
             segment_ms = self.mel_transform(segment.unsqueeze(0)).squeeze(0)
@@ -129,9 +148,22 @@ class MynaInference:
             sampled_ms = sample_spectrogram(segment_ms, self.n_frames)
             segment_spectrograms.append(sampled_ms[0])  # Take first (and only) sample: (64, 96)
 
+        if profile:
+            mel_time = time.perf_counter() - mel_start
+            print(f"  Mel spectrograms (4 segments): {mel_time:.3f}s")
+
         # Stack all segments: (num_samples, n_mels, n_frames) - same as original
+        if profile:
+            hash_start = time.perf_counter()
+            
         ms = torch.stack(segment_spectrograms)
         audio_hash = self._compute_hash_from_samples(ms)
+        
+        if profile:
+            hash_time = time.perf_counter() - hash_start
+            total_time = time.perf_counter() - total_start
+            print(f"  Hash computation: {hash_time:.3f}s")
+            print(f"  Total preprocessing: {total_time:.3f}s")
 
         return ms, audio_hash
 
@@ -160,7 +192,7 @@ class MynaInference:
 
         return audio_files
 
-    def process_folder(self, folder_path: str, vector_store, progress_callback=None):
+    def process_folder(self, folder_path: str, vector_store, progress_callback=None, profile: bool = False, audio_files: list = None):
         """
         Process all audio files in a folder.
 
@@ -169,11 +201,14 @@ class MynaInference:
             vector_store: Vector store for checking existing embeddings and storage
             progress_callback: Optional callback function for progress updates
                              Called with (filename, success, result_or_error)
+            profile: Whether to output timing information for preprocessing
+            audio_files: Optional list of specific audio files to process (default: all files in folder)
 
         Returns:
             dict: Dictionary mapping filenames to embeddings
         """
-        audio_files = self.get_audio_files(folder_path)
+        if audio_files is None:
+            audio_files = self.get_audio_files(folder_path)
         results = {}
 
         # Process each audio file
@@ -181,7 +216,7 @@ class MynaInference:
             filename = os.path.basename(audio_file)
 
             # Extract strategic segments and compute hash
-            ms, audio_hash = self._preprocess_audio(audio_file)
+            ms, audio_hash = self._preprocess_audio(audio_file, profile=profile)
 
             # Check if file needs reprocessing based on audio content
             if not vector_store.needs_reprocessing(audio_file, audio_hash):
