@@ -18,7 +18,7 @@ def prompt_qdrant_install() -> bool:
     print("  • Finding similar tracks across your collection")
     print("  • Building music recommendation systems")
     print("  • Data visualization and analysis")
-    
+
     while True:
         response = input("\nWould you like to install QDrant as a startup service? (y/n): ").lower().strip()
         if response in ['y', 'yes']:
@@ -90,7 +90,7 @@ def main():
                 print(f"Warning: Could not connect to QDrant at {args.qdrant_url}")
                 print("Proceeding without vector storage...")
                 args.qdrant_url = 'none'
-        
+
         # Try to connect to QDrant
         if args.qdrant_url.lower() != 'none':
             try:
@@ -103,13 +103,7 @@ def main():
 
     try:
         audio_files = inference.get_audio_files(args.folder)
-        
-        # Limit to 25 files for profiling
-        if len(audio_files) > 25:
-            audio_files = audio_files[:25]
-            print(f"Found {len(inference.get_audio_files(args.folder))} audio files, profiling first 25 in {args.folder}")
-        else:
-            print(f"Found {len(audio_files)} audio files in {args.folder}")
+        print(f"Found {len(audio_files)} audio files in {args.folder}")
 
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
         stored_count = 0
@@ -121,7 +115,7 @@ def main():
             else:
                 embeddings = result_or_error
                 tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}')
-                
+
                 # Store in vector database if enabled
                 if vector_store:
                     # Get full file path for the file we just processed
@@ -130,7 +124,7 @@ def main():
                         if audio_file.endswith(filename):
                             full_path = audio_file
                             break
-                    
+
                     vector_store.store_track(full_path, embeddings, audio_hash)
                     stored_count += 1
                     tqdm.write(f'  → Stored in vector database')
@@ -140,29 +134,29 @@ def main():
         import cProfile
         import pstats
         import io
-        
+
         print("\n🔍 Profiling to identify preprocessing bottlenecks...")
         profiler = cProfile.Profile()
         profiler.enable()
-        
+
         results = inference.process_folder(args.folder, vector_store, progress_callback, audio_files=audio_files)
-        
+
         profiler.disable()
         progress_bar.close()
-        
+
         # Show top time-consuming functions
         s = io.StringIO()
         ps = pstats.Stats(profiler, stream=s)
         ps.sort_stats('cumulative')
         ps.print_stats(10)  # Top 10 functions
-        
+
         print("\n📊 TOP 10 FUNCTIONS BY TIME:")
         print("="*50)
         print(s.getvalue())
 
         successful_files = len([r for r in results.values() if r is not None])
         print(f"\nProcessed {successful_files} files successfully")
-        
+
         if vector_store:
             print(f"Stored {stored_count} embeddings in vector database")
             print(f"Collection info: {vector_store.collection_info()}")
