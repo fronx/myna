@@ -8,15 +8,15 @@ Welcome to the official repository for **Myna: Masking-Based Contrastive Learnin
 
 We provide pretrained model checkpoints for different configurations of the Myna model:
 
-- [Myna-Base](https://drive.google.com/file/d/1JZgR9zqTHz7a0To4X6PWHOuOlM8DBwvL/view?usp=sharing)  
-- [Myna-Vertical](https://drive.google.com/file/d/1C8ZjL29Y_GII1v808x0k0-tv5rR7GWGA/view?usp=sharing)  
-- [Myna-Hybrid](https://drive.google.com/file/d/1-U4BmDVOf2kllsXY0H3R1GNat9kZaWrp/view?usp=sharing)  
+- [Myna-Base](https://drive.google.com/file/d/1JZgR9zqTHz7a0To4X6PWHOuOlM8DBwvL/view?usp=sharing)
+- [Myna-Vertical](https://drive.google.com/file/d/1C8ZjL29Y_GII1v808x0k0-tv5rR7GWGA/view?usp=sharing)
+- [Myna-Hybrid](https://drive.google.com/file/d/1-U4BmDVOf2kllsXY0H3R1GNat9kZaWrp/view?usp=sharing)
 
 Feel free to download and use these models for your tasks.
 
 ## Inference Example
 
-To get started with inference, you can refer to the minimal example provided in the script [example.py](https://github.com/ghost-signal/myna/blob/main/example.py).
+To get started with inference, you can run the indexer that writes embeddings to QDrant: [index.py](https://github.com/fronx/myna/blob/main/index.py).
 
 
 ## Setup
