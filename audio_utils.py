@@ -12,6 +12,7 @@ import numpy as np
 from nnAudio.features.mel import MelSpectrogram
 import essentia.standard as es
 from statistics import mean
+import warnings
 
 
 def get_audio_info(filename: str):
@@ -36,7 +37,9 @@ def get_audio_info(filename: str):
                 return f.samplerate, len(f)
         except:
             # Last resort: use librosa (slower but works for more formats)
-            y, sr = librosa.load(filename, sr=None, duration=0.1)  # Load tiny sample
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                y, sr = librosa.load(filename, sr=None, duration=0.1)  # Load tiny sample
             # Estimate total frames
             import os
             file_size = os.path.getsize(filename)
@@ -87,8 +90,10 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
             offset_sec = 0
             duration_sec = None
 
-        signal_np, sr = librosa.load(filename, sr=None, mono=False,
-                                   offset=offset_sec, duration=duration_sec)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            signal_np, sr = librosa.load(filename, sr=None, mono=False,
+                                       offset=offset_sec, duration=duration_sec)
         if profile:
             decode_time = time.perf_counter() - decode_start
             frames_info = f" ({num_frames} frames)" if num_frames else ""
