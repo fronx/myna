@@ -76,8 +76,14 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
     except RuntimeError:
         # Fallback to librosa for MP3 files
         # Note: librosa offset/duration are in seconds, not frames
-        offset_sec = (start_frame / target_sr) if start_frame else 0
-        duration_sec = (num_frames / target_sr) if num_frames else None
+        # We need to get the original sample rate to calculate correct offset/duration
+        if start_frame is not None or num_frames is not None:
+            original_sr, _ = get_audio_info(filename)
+            offset_sec = (start_frame / original_sr) if start_frame else 0
+            duration_sec = (num_frames / original_sr) if num_frames else None
+        else:
+            offset_sec = 0
+            duration_sec = None
 
         signal_np, sr = librosa.load(filename, sr=None, mono=False,
                                    offset=offset_sec, duration=duration_sec)
@@ -91,6 +97,10 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
             signal = torch.from_numpy(signal_np).unsqueeze(0)
         else:
             signal = torch.from_numpy(signal_np)
+            
+        # Handle empty signals gracefully
+        if signal.numel() == 0:
+            raise RuntimeError(f"Loaded audio segment is empty. This might happen if the requested segment (start_frame={start_frame}, num_frames={num_frames}) is beyond the end of the file.")
 
     if profile:
         mono_start = time.perf_counter()
