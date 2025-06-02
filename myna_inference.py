@@ -8,7 +8,7 @@ import torch
 
 from utils import get_n_frames, load_model
 from vit import SimpleViT
-from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info, extract_mean_energy
+from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info, extract_mean_energy, compute_waveform_peaks
 import essentia.standard as es
 from nnAudio.features.mel import MelSpectrogram
 
@@ -106,7 +106,7 @@ class MynaInference:
             profile: Whether to output timing information
 
         Returns:
-            tuple: (spectrogram_samples, audio_hash, mean_energy)
+            tuple: (spectrogram_samples, audio_hash, mean_energy, waveform_peaks, duration_seconds)
         """
         import time
 
@@ -120,10 +120,13 @@ class MynaInference:
 
         # Get audio info without loading full file
         original_sr, total_frames = get_audio_info(audio_file)
+        
+        # Calculate duration in seconds
+        duration_seconds = total_frames / original_sr
 
         if profile:
             info_time = time.perf_counter() - start_time
-            print(f"  Audio info: {info_time:.3f}s")
+            print(f"  Audio info: {info_time:.3f}s (duration: {duration_seconds:.1f}s)")
 
         # Calculate segment positions and sizes
         segment_positions = [0.15, 0.35, 0.55, 0.75]
@@ -168,13 +171,21 @@ class MynaInference:
         # Extract mean energy from raw audio segments
         mean_energy = extract_mean_energy(audio_segments, self.energy)
 
+        # Compute waveform peaks for visualization
         if profile:
+            waveform_start = time.perf_counter()
+        
+        waveform_peaks = compute_waveform_peaks(audio_file, self.sample_rate)
+
+        if profile:
+            waveform_time = time.perf_counter() - waveform_start
             hash_time = time.perf_counter() - hash_start
             total_time = time.perf_counter() - total_start
             print(f"  Hash computation: {hash_time:.3f}s")
+            print(f"  Waveform peaks: {waveform_time:.3f}s")
             print(f"  Total preprocessing: {total_time:.3f}s")
 
-        return ms, audio_hash, mean_energy
+        return ms, audio_hash, mean_energy, waveform_peaks, duration_seconds
 
 
     def get_audio_files(self, folder_path: str):
@@ -226,16 +237,18 @@ class MynaInference:
             filename = os.path.basename(audio_file)
 
             # Extract strategic segments and compute hash
-            ms, audio_hash, mean_energy = self._preprocess_audio(audio_file, profile=profile)
+            ms, audio_hash, mean_energy, waveform_peaks, duration_seconds = self._preprocess_audio(audio_file, profile=profile)
 
             # Check if file needs reprocessing based on audio content
             if not force and not vector_store.needs_reprocessing(audio_file, audio_hash):
                 results[filename] = "skipped"
                 if progress_callback:
-                    # Get stored energy for skipped files
+                    # Get stored energy and waveform for skipped files
                     stored_info = vector_store.get_track_info(audio_file)
                     stored_energy = stored_info.get("energy") if stored_info else None
-                    progress_callback(filename, True, "skipped", audio_hash, stored_energy)
+                    stored_waveform = stored_info.get("waveform") if stored_info else None
+                    stored_duration = stored_info.get("duration") if stored_info else duration_seconds
+                    progress_callback(filename, True, "skipped", audio_hash, stored_energy, stored_waveform, stored_duration)
                 continue
 
             # Run inference on the already-preprocessed spectrogram
@@ -251,7 +264,7 @@ class MynaInference:
             results[filename] = embeds
 
             if progress_callback:
-                progress_callback(filename, True, embeds, audio_hash, mean_energy)
+                progress_callback(filename, True, embeds, audio_hash, mean_energy, waveform_peaks, duration_seconds)
 
         return results
 

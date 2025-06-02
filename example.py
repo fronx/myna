@@ -110,14 +110,16 @@ def main():
         progress_bar = tqdm(total=len(audio_files), desc="Processing audio files")
         stored_count = 0
 
-        def progress_callback(filename, success, result_or_error, audio_hash, mean_energy):
+        def progress_callback(filename, success, result_or_error, audio_hash, mean_energy, waveform_peaks=None, duration_seconds=None):
             nonlocal stored_count
             if result_or_error == "skipped":
                 tqdm.write(f'⏭ {filename}: already processed (hash match)')
             else:
                 embeddings = result_or_error
                 energy_info = f" (energy: {mean_energy:.3f})" if mean_energy is not None else ""
-                tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}{energy_info}')
+                waveform_info = f", waveform: {len(waveform_peaks[0]) if waveform_peaks else 0} peaks" if waveform_peaks else ""
+                duration_info = f", duration: {duration_seconds:.1f}s" if duration_seconds is not None else ""
+                tqdm.write(f'✓ {filename}: embeddings shape {embeddings.shape}{energy_info}{waveform_info}{duration_info}')
 
                 # Store in vector database if enabled
                 if vector_store:
@@ -128,7 +130,7 @@ def main():
                             full_path = audio_file
                             break
 
-                    vector_store.store_track(full_path, embeddings, audio_hash, mean_energy)
+                    vector_store.store_track(full_path, embeddings, audio_hash, mean_energy, waveform_peaks, duration_seconds)
                     stored_count += 1
                     tqdm.write(f'  → Stored in vector database')
             progress_bar.update(1)

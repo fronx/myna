@@ -112,7 +112,7 @@ class MynaVectorStore:
             return embeddings.cpu().numpy()
 
     def store_track(self, file_path: str, embeddings: torch.Tensor,
-                   audio_hash: str, energy: float, metadata: Optional[Dict] = None) -> str:
+                   audio_hash: str, energy: float, waveform: List, duration: float, metadata: Optional[Dict] = None) -> str:
         """
         Store track embeddings and metadata.
 
@@ -121,6 +121,8 @@ class MynaVectorStore:
             embeddings: Myna embeddings tensor
             audio_hash: Hash of the audio samples used for embedding generation
             energy: Energy value extracted from audio segments
+            waveform: Waveform peaks data for visualization
+            duration: Duration of the audio file in seconds
             metadata: Optional additional metadata
 
         Returns:
@@ -134,9 +136,11 @@ class MynaVectorStore:
         if metadata:
             track_metadata.update(metadata)
 
-        # Add audio sample hash and energy
+        # Add audio sample hash, energy, waveform, and duration
         track_metadata["audio_sample_hash"] = audio_hash
         track_metadata["energy"] = energy
+        track_metadata["waveform"] = waveform
+        track_metadata["duration"] = duration
 
         # Average embeddings if multiple samples
         embedding_vector = self._average_embeddings(embeddings)
@@ -266,6 +270,14 @@ class MynaVectorStore:
 
         if "energy" not in track_info:
             # Missing energy data, needs reprocessing
+            return True
+
+        if "waveform" not in track_info:
+            # Missing waveform data, needs reprocessing
+            return True
+
+        if "duration" not in track_info:
+            # Missing duration data, needs reprocessing
             return True
 
         # Compare audio content hashes

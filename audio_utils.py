@@ -189,3 +189,56 @@ def extract_mean_energy(audio_segments: list, energy_extractor: es.Energy) -> fl
         for segment in audio_segments
     )
     return mean(normalized_energies)
+
+
+def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pixel: int = 512) -> list:
+    """
+    Compute waveform peaks for WaveSurfer visualization.
+    
+    Args:
+        filename: Path to audio file
+        target_sr: Target sample rate for processing
+        samples_per_pixel: Number of audio samples per waveform pixel
+    
+    Returns:
+        list: Waveform peaks data as list of lists (one per channel)
+    """
+    # Load full audio file
+    signal = load_raw_audio(filename, target_sr)
+    
+    # Ensure we have shape (channels, samples)
+    if signal.dim() == 1:
+        signal = signal.unsqueeze(0)  # Add channel dimension
+    
+    channels = signal.shape[0]
+    total_samples = signal.shape[1]
+    
+    # Calculate number of peaks based on samples per pixel
+    num_peaks = total_samples // samples_per_pixel
+    if num_peaks == 0:
+        num_peaks = 1
+    
+    peaks_data = []
+    
+    for channel in range(channels):
+        channel_data = signal[channel].numpy()
+        peaks = []
+        
+        for i in range(num_peaks):
+            start_idx = i * samples_per_pixel
+            end_idx = min(start_idx + samples_per_pixel, total_samples)
+            
+            # Get segment for this pixel
+            segment = channel_data[start_idx:end_idx]
+            
+            # Compute peak (max absolute value in this segment)
+            if len(segment) > 0:
+                peak = float(max(abs(segment.min()), abs(segment.max())))
+            else:
+                peak = 0.0
+            
+            peaks.append(peak)
+        
+        peaks_data.append(peaks)
+    
+    return peaks_data
