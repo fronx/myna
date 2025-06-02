@@ -173,7 +173,7 @@ def get_audio_files(folder_path: str):
     Returns:
         list: Sorted list of audio file paths
     """
-    audio_extensions = ['*.mp3', '*.wav', '*.flac', '*.m4a', '*.aac', '*.ogg']
+    audio_extensions = ['*.mp3', '*.wav', '*.flac', '*.m4a', '*.aac', '*.ogg', '*.aiff', '*.aif']
     audio_files = []
 
     for ext in audio_extensions:
