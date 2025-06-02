@@ -76,7 +76,9 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
     except RuntimeError:
         # Fallback to librosa for MP3 files
         # Note: librosa offset/duration are in seconds, not frames
-        # We need to get the original sample rate to calculate correct offset/duration
+        # IMPORTANT: When using librosa fallback, we must use the original file's sample rate
+        # for offset/duration calculations, not the target sample rate. This was a critical
+        # bug that caused "empty tensor" errors during resampling.
         if start_frame is not None or num_frames is not None:
             original_sr, _ = get_audio_info(filename)
             offset_sec = (start_frame / original_sr) if start_frame else 0
@@ -98,9 +100,14 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
         else:
             signal = torch.from_numpy(signal_np)
             
-        # Handle empty signals gracefully
+        # Handle empty signals - this typically indicates metadata inconsistencies
+        # where the file's reported duration exceeds its actual audio content
         if signal.numel() == 0:
-            raise RuntimeError(f"Loaded audio segment is empty. This might happen if the requested segment (start_frame={start_frame}, num_frames={num_frames}) is beyond the end of the file.")
+            raise RuntimeError(
+                f"Loaded audio segment is empty (start_frame={start_frame}, num_frames={num_frames}). "
+                f"This usually indicates the file has metadata that reports longer duration than "
+                f"the actual audio content - common with some .m4a and .mp3 files."
+            )
 
     if profile:
         mono_start = time.perf_counter()
@@ -200,6 +207,93 @@ def extract_mean_energy(audio_segments: list, energy_extractor: es.Energy) -> fl
         for segment in audio_segments
     )
     return mean(normalized_energies)
+
+
+def load_audio_segment_with_fallback(filename: str, target_sr: int, start_frame: int, 
+                                   num_frames: int, profile: bool = False):
+    """
+    Load audio segment, returning None if segment is beyond actual file content.
+    
+    Handles metadata inconsistencies where files report longer duration than actual audio.
+    """
+    try:
+        return load_raw_audio(filename, target_sr, profile=profile,
+                            start_frame=start_frame, num_frames=num_frames)
+    except RuntimeError as e:
+        if "empty" in str(e).lower():
+            # This typically indicates the requested segment is beyond the actual
+            # audio content due to metadata inconsistencies (common with some .m4a files)
+            return None
+        else:
+            # Re-raise genuine errors (corruption, permission issues, etc.)
+            raise
+
+
+def extract_audio_segments(filename: str, total_frames: int, original_sr: int, target_sr: int,
+                         n_samples: int, mel_transform, n_frames: int, profile: bool = False):
+    """
+    Extract audio segments from strategic positions in the track for robust analysis.
+    
+    Uses a "record store sampling" approach - taking segments from 15%, 35%, 55%, 
+    and 75% positions to avoid intro/outro and capture the song's core content.
+    
+    Handles files with metadata inconsistencies gracefully by skipping segments 
+    that extend beyond the actual audio content.
+    
+    Args:
+        filename: Path to audio file
+        total_frames: Total frames reported in metadata
+        original_sr: Original sample rate of the file
+        target_sr: Target sample rate for processing
+        n_samples: Number of samples per embedding chunk
+        mel_transform: Mel spectrogram transform function
+        n_frames: Number of frames per sample for spectrograms
+        profile: Whether to output timing information
+        
+    Returns:
+        tuple: (segment_spectrograms, audio_segments) where both are lists
+              containing the successfully extracted segments
+    """
+    segment_positions = [0.15, 0.35, 0.55, 0.75]
+    extract_duration_samples = max(n_samples, int(0.1 * total_frames))
+    
+    segment_spectrograms = []
+    audio_segments = []
+    
+    for position in segment_positions:
+        # Calculate segment boundaries in original sample rate
+        start_frame = int(position * total_frames)
+        num_frames = min(extract_duration_samples, total_frames - start_frame)
+        
+        # Skip segments that are too small or go beyond the file
+        if num_frames <= 0 or start_frame >= total_frames:
+            if profile:
+                print(f"    Skipping segment at {position:.1%}: insufficient audio data")
+            continue
+
+        # Load segment with robust error handling
+        segment = load_audio_segment_with_fallback(
+            filename, target_sr, start_frame, num_frames, profile
+        )
+        
+        if segment is None:
+            # Segment was beyond actual file content (metadata mismatch)
+            if profile:
+                print(f"    Skipping segment at {position:.1%}: beyond actual file content")
+            continue
+
+        # Store raw audio segment for energy extraction
+        audio_segments.append(segment)
+
+        # Convert to mel spectrogram (this will have variable frames)
+        segment_ms = mel_transform(segment.unsqueeze(0)).squeeze(0)
+        segment_ms = segment_ms.unsqueeze(0)  # Shape: (1, n_mels, frames)
+
+        # Use sample_spectrogram to get exactly the right frames (just like original)
+        sampled_ms = sample_spectrogram(segment_ms, n_frames)
+        segment_spectrograms.append(sampled_ms[0])  # Take first (and only) sample: (64, 96)
+        
+    return segment_spectrograms, audio_segments
 
 
 def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pixel: int = 512) -> list:

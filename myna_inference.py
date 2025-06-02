@@ -8,7 +8,7 @@ import torch
 
 from utils import get_n_frames, load_model
 from vit import SimpleViT
-from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info, extract_mean_energy, compute_waveform_peaks
+from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info, extract_mean_energy, compute_waveform_peaks, extract_audio_segments
 import essentia.standard as es
 from nnAudio.features.mel import MelSpectrogram
 
@@ -97,6 +97,7 @@ class MynaInference:
         return hasher.hexdigest()
 
 
+
     def _preprocess_audio(self, audio_file: str, profile: bool = False):
         """
         Preprocess audio file by extracting strategic segments and computing spectrograms.
@@ -128,38 +129,22 @@ class MynaInference:
             info_time = time.perf_counter() - start_time
             print(f"  Audio info: {info_time:.3f}s (duration: {duration_seconds:.1f}s)")
 
-        # Calculate segment positions and sizes
-        segment_positions = [0.15, 0.35, 0.55, 0.75]
-        extract_duration_samples = max(self.n_samples, int(0.1 * total_frames))
-
+        # Extract strategic audio segments with robust error handling
         if profile:
             mel_start = time.perf_counter()
 
-        segment_spectrograms = []
-        audio_segments = []
-        for position in segment_positions:
-            # Calculate segment boundaries in original sample rate
-            start_frame = int(position * total_frames)
-            num_frames = min(extract_duration_samples, total_frames - start_frame)
-
-            # Load only this segment
-            segment = load_raw_audio(audio_file, self.sample_rate, profile=profile,
-                                   start_frame=start_frame, num_frames=num_frames)
-
-            # Store raw audio segment for energy extraction
-            audio_segments.append(segment)
-
-            # Convert to mel spectrogram (this will have variable frames)
-            segment_ms = self.mel_transform(segment.unsqueeze(0)).squeeze(0)
-            segment_ms = segment_ms.unsqueeze(0)  # Shape: (1, n_mels, frames)
-
-            # Use sample_spectrogram to get exactly the right frames (just like original)
-            sampled_ms = sample_spectrogram(segment_ms, self.n_frames)
-            segment_spectrograms.append(sampled_ms[0])  # Take first (and only) sample: (64, 96)
+        segment_spectrograms, audio_segments = extract_audio_segments(
+            audio_file, total_frames, original_sr, self.sample_rate,
+            self.n_samples, self.mel_transform, self.n_frames, profile
+        )
 
         if profile:
             mel_time = time.perf_counter() - mel_start
-            print(f"  Mel spectrograms (4 segments): {mel_time:.3f}s")
+            print(f"  Mel spectrograms ({len(segment_spectrograms)} segments): {mel_time:.3f}s")
+
+        # Ensure we have at least one segment
+        if len(segment_spectrograms) == 0:
+            raise RuntimeError(f"No valid audio segments could be extracted from {audio_file}. The file might be too short or corrupted.")
 
         # Stack all segments: (num_samples, n_mels, n_frames) - same as original
         if profile:
