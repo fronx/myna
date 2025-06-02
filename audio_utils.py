@@ -8,6 +8,7 @@ import torch
 import torchaudio
 import torchaudio.transforms as T
 import librosa
+import numpy as np
 from nnAudio.features.mel import MelSpectrogram
 import essentia.standard as es
 from statistics import mean
@@ -193,7 +194,7 @@ def extract_mean_energy(audio_segments: list, energy_extractor: es.Energy) -> fl
 
 def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pixel: int = 512) -> list:
     """
-    Compute waveform peaks for WaveSurfer visualization.
+    Compute waveform peaks for WaveSurfer visualization using vectorized NumPy operations.
     
     Args:
         filename: Path to audio file
@@ -222,22 +223,19 @@ def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pi
     
     for channel in range(channels):
         channel_data = signal[channel].numpy()
-        peaks = []
         
-        for i in range(num_peaks):
-            start_idx = i * samples_per_pixel
-            end_idx = min(start_idx + samples_per_pixel, total_samples)
+        # Vectorized peak computation using reshape and max
+        if total_samples >= samples_per_pixel:
+            # Trim to exact multiple of samples_per_pixel for efficient reshaping
+            trimmed_length = num_peaks * samples_per_pixel
+            trimmed_data = channel_data[:trimmed_length]
             
-            # Get segment for this pixel
-            segment = channel_data[start_idx:end_idx]
-            
-            # Compute peak (max absolute value in this segment)
-            if len(segment) > 0:
-                peak = float(max(abs(segment.min()), abs(segment.max())))
-            else:
-                peak = 0.0
-            
-            peaks.append(peak)
+            # Reshape and compute max absolute value per segment (vectorized)
+            reshaped = trimmed_data.reshape(num_peaks, samples_per_pixel)
+            peaks = np.max(np.abs(reshaped), axis=1).tolist()
+        else:
+            # Fallback for very short audio
+            peaks = [float(np.max(np.abs(channel_data))) if len(channel_data) > 0 else 0.0]
         
         peaks_data.append(peaks)
     
