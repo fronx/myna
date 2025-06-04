@@ -50,6 +50,22 @@ def install_qdrant_service() -> bool:
         print("❌ install_qdrant_service.py not found")
         return False
 
+def connect_to_qdrant(qdrant_url: str) -> MynaVectorStore:
+    success = qdrant_url.lower() != 'none' and is_qdrant_running(qdrant_url)
+    if not success:
+        print(f"XX QDrant is not running at {qdrant_url}")
+        # Only prompt for localhost (not remote servers)
+        if qdrant_url == 'http://localhost:6333':
+            if prompt_qdrant_install():
+                if install_qdrant_service():
+                    # Give QDrant a moment to start
+                    wait_for_qdrant(qdrant_url, timeout=10)
+                    success = True
+
+    if success:
+        return MynaVectorStore(url=qdrant_url)
+    else:
+        raise Exception(f"Could not connect to QDrant at {qdrant_url}")
 
 def main():
     parser = argparse.ArgumentParser(description='Process audio files in a folder with Myna model')
@@ -74,36 +90,8 @@ def main():
     )
 
     # Initialize vector store unless explicitly disabled
-    vector_store = None
-    if args.qdrant_url.lower() != 'none':
-        # Check if QDrant is running
-        if not is_qdrant_running(args.qdrant_url):
-            # Only prompt for localhost (not remote servers)
-            if args.qdrant_url == 'http://localhost:6333':
-                if prompt_qdrant_install():
-                    if install_qdrant_service():
-                        # Give QDrant a moment to start
-                        wait_for_qdrant(args.qdrant_url, timeout=10)
-                    else:
-                        print("Proceeding without vector storage...")
-                        args.qdrant_url = 'none'
-                else:
-                    print("Proceeding without vector storage...")
-                    args.qdrant_url = 'none'
-            else:
-                print(f"Warning: Could not connect to QDrant at {args.qdrant_url}")
-                print("Proceeding without vector storage...")
-                args.qdrant_url = 'none'
-
-        # Try to connect to QDrant
-        if args.qdrant_url.lower() != 'none':
-            try:
-                vector_store = MynaVectorStore(url=args.qdrant_url)
-                print(f"Vector store initialized: {vector_store.collection_info()}")
-            except Exception as e:
-                print(f"Warning: Could not connect to QDrant at {args.qdrant_url}: {e}")
-                print("Proceeding without vector storage...")
-                vector_store = None
+    vector_store = connect_to_qdrant(args.qdrant_url)
+    print(f"Vector store initialized: {vector_store.collection_info()}")
 
     try:
         audio_files = inference.get_audio_files(args.folder)
@@ -166,31 +154,31 @@ def main():
 
         if vector_store and stored_count > 0:
             print(f"Stored {stored_count} embeddings in vector database")
-            
+
             # Compute and update PCA vectors
             print("\n🔬 Computing PCA vectors...")
             try:
                 # Get all embeddings
                 point_ids, embeddings = vector_store.get_all_embeddings()
                 print(f"Retrieved {len(point_ids)} embeddings for PCA")
-                
+
                 # Fit PCA
                 pca = PCA(n_components=16)
                 pca_vectors = pca.fit_transform(embeddings)
-                
+
                 # Show explained variance
                 explained_var = pca.explained_variance_ratio_.sum()
                 print(f"PCA explained variance ratio: {explained_var:.3f}")
                 print(f"PCA shape: {pca_vectors.shape}")
-                
+
                 # Update all tracks with PCA vectors
                 print("Updating tracks with PCA vectors...")
                 vector_store.update_pca_vectors(point_ids, pca_vectors)
                 print("✅ PCA vectors updated successfully")
-                
+
             except Exception as e:
                 print(f"❌ Error computing PCA vectors: {e}")
-            
+
             print(f"\nCollection info: {vector_store.collection_info()}")
 
     except ValueError as e:

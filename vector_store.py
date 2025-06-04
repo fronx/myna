@@ -307,8 +307,7 @@ class MynaVectorStore:
         info = self.client.get_collection(self.collection_name)
         return {
             "name": self.collection_name,
-            "vector_size": info.config.params.vectors.size,
-            "distance": info.config.params.vectors.distance,
+            "config": info.config,
             "points_count": info.points_count,
             "status": info.status
         }
