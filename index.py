@@ -152,29 +152,33 @@ def main():
         successful_files = len([r for r in results.values() if r is not None])
         print(f"\nProcessed {successful_files} files successfully")
 
-        if vector_store and stored_count > 0:
-            print(f"Stored {stored_count} embeddings in vector database")
+        if vector_store and successful_files > 0:
+            if stored_count > 0:
+                print(f"Stored {stored_count} new embeddings in vector database")
 
-            # Compute and update PCA vectors
+            # Always compute and update PCA vectors if we have a vector store
             print("\n🔬 Computing PCA vectors...")
             try:
                 # Get all embeddings
                 point_ids, embeddings = vector_store.get_all_embeddings()
                 print(f"Retrieved {len(point_ids)} embeddings for PCA")
 
-                # Fit PCA
-                pca = PCA(n_components=16)
-                pca_vectors = pca.fit_transform(embeddings)
+                if len(point_ids) > 0:
+                    # Fit PCA
+                    pca = PCA(n_components=16)
+                    pca_vectors = pca.fit_transform(embeddings)
 
-                # Show explained variance
-                explained_var = pca.explained_variance_ratio_.sum()
-                print(f"PCA explained variance ratio: {explained_var:.3f}")
-                print(f"PCA shape: {pca_vectors.shape}")
+                    # Show explained variance
+                    explained_var = pca.explained_variance_ratio_.sum()
+                    print(f"PCA explained variance ratio: {explained_var:.3f}")
+                    print(f"PCA shape: {pca_vectors.shape}")
 
-                # Update all tracks with PCA vectors
-                print("Updating tracks with PCA vectors...")
-                vector_store.update_pca_vectors(point_ids, pca_vectors)
-                print("✅ PCA vectors updated successfully")
+                    # Update all tracks with PCA vectors
+                    print("Updating tracks with PCA vectors...")
+                    vector_store.update_pca_vectors(point_ids, pca_vectors)
+                    print("✅ PCA vectors updated successfully")
+                else:
+                    print("No embeddings found in database")
 
             except Exception as e:
                 print(f"❌ Error computing PCA vectors: {e}")

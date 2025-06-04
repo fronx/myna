@@ -353,22 +353,22 @@ class MynaVectorStore:
             point_ids: List of point IDs to update
             pca_vectors: Array of PCA vectors (shape: [n_points, 16])
         """
-        # Update in batches
+        # Update in batches - only update the pca16 vector, leaving embedding768 unchanged
         batch_size = 100
         for i in range(0, len(point_ids), batch_size):
             batch_ids = point_ids[i:i + batch_size]
             batch_vectors = pca_vectors[i:i + batch_size]
 
+            # Create points with only the pca16 vector - QDrant will preserve other vectors
             points = []
-            for pid, pca_vec in zip(batch_ids, batch_vectors):
-                points.append(
-                    PointStruct(
-                        id=pid,
-                        vector={"pca16": pca_vec.tolist()}
-                    )
-                )
+            for j, point_id in enumerate(batch_ids):
+                points.append(PointStruct(
+                    id=point_id,
+                    vector={"pca16": batch_vectors[j].tolist()}
+                ))
 
-            self.client.update_vectors(
+            # Upsert with only pca16 vector - existing embedding768 and payload preserved
+            self.client.upsert(
                 collection_name=self.collection_name,
                 points=points
             )
