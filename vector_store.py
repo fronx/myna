@@ -153,8 +153,24 @@ class MynaVectorStore:
         # Average embeddings if multiple samples
         embedding_vector = self._average_embeddings(embeddings)
 
+        # Check if point already exists to preserve vectors
+        try:
+            existing_points = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[point_id],
+                with_vectors=True
+            )
+            existing_vectors = existing_points[0].vector if existing_points else None
+        except:
+            existing_vectors = None
+
         # Prepare vectors - always include embedding768
         vectors = {"embedding768": embedding_vector.tolist()}
+
+        # If updating existing point, preserve pca16 if not provided
+        if existing_vectors and isinstance(existing_vectors, dict):
+            if pca_embedding is None and "pca16" in existing_vectors:
+                vectors["pca16"] = existing_vectors["pca16"]
 
         # Add PCA if provided (second pass)
         if pca_embedding is not None:
@@ -353,22 +369,22 @@ class MynaVectorStore:
             point_ids: List of point IDs to update
             pca_vectors: Array of PCA vectors (shape: [n_points, 16])
         """
-        # Update in batches - only update the pca16 vector, leaving embedding768 unchanged
+        # Update in batches - use update_vectors to preserve existing vectors
         batch_size = 100
         for i in range(0, len(point_ids), batch_size):
             batch_ids = point_ids[i:i + batch_size]
             batch_vectors = pca_vectors[i:i + batch_size]
 
-            # Create points with only the pca16 vector - QDrant will preserve other vectors
+            # Create update points with only the pca16 vector
             points = []
             for j, point_id in enumerate(batch_ids):
-                points.append(PointStruct(
-                    id=point_id,
-                    vector={"pca16": batch_vectors[j].tolist()}
-                ))
+                points.append({
+                    "id": point_id,
+                    "vector": {"pca16": batch_vectors[j].tolist()}
+                })
 
-            # Upsert with only pca16 vector - existing embedding768 and payload preserved
-            self.client.upsert(
+            # Use update_vectors to only update pca16, preserving embedding768
+            self.client.update_vectors(
                 collection_name=self.collection_name,
                 points=points
             )
