@@ -4,6 +4,8 @@ Minimal script example for model inference
 
 import argparse
 import subprocess
+import numpy as np
+from sklearn.decomposition import PCA
 from tqdm import tqdm
 from myna_inference import MynaInference
 from vector_store import MynaVectorStore
@@ -162,9 +164,34 @@ def main():
         successful_files = len([r for r in results.values() if r is not None])
         print(f"\nProcessed {successful_files} files successfully")
 
-        if vector_store:
+        if vector_store and stored_count > 0:
             print(f"Stored {stored_count} embeddings in vector database")
-            print(f"Collection info: {vector_store.collection_info()}")
+            
+            # Compute and update PCA vectors
+            print("\n🔬 Computing PCA vectors...")
+            try:
+                # Get all embeddings
+                point_ids, embeddings = vector_store.get_all_embeddings()
+                print(f"Retrieved {len(point_ids)} embeddings for PCA")
+                
+                # Fit PCA
+                pca = PCA(n_components=16)
+                pca_vectors = pca.fit_transform(embeddings)
+                
+                # Show explained variance
+                explained_var = pca.explained_variance_ratio_.sum()
+                print(f"PCA explained variance ratio: {explained_var:.3f}")
+                print(f"PCA shape: {pca_vectors.shape}")
+                
+                # Update all tracks with PCA vectors
+                print("Updating tracks with PCA vectors...")
+                vector_store.update_pca_vectors(point_ids, pca_vectors)
+                print("✅ PCA vectors updated successfully")
+                
+            except Exception as e:
+                print(f"❌ Error computing PCA vectors: {e}")
+            
+            print(f"\nCollection info: {vector_store.collection_info()}")
 
     except ValueError as e:
         print(e)

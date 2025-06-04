@@ -16,7 +16,7 @@ from mutagen import File as MutagenFile
 class MynaVectorStore:
     """QDrant vector store for Myna embeddings"""
 
-    def __init__(self, collection_name: str = "myna_embeddings",
+    def __init__(self, collection_name: str = "myna_embeddings_new",
                  url: Optional[str] = None, db_path: Optional[str] = None):
         """
         Initialize QDrant vector store.
@@ -44,13 +44,19 @@ class MynaVectorStore:
         collection_names = [c.name for c in collections]
 
         if self.collection_name not in collection_names:
-            # Myna embeddings are 768-dimensional
+            # Myna embeddings are 768-dimensional, PCA are 16-dimensional
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=768,
-                    distance=Distance.COSINE
-                )
+                vectors_config={
+                    "embedding768": VectorParams(
+                        size=768,
+                        distance=Distance.COSINE
+                    ),
+                    "pca16": VectorParams(
+                        size=16,
+                        distance=Distance.COSINE
+                    )
+                }
             )
             print(f"Created collection: {self.collection_name}")
 
@@ -112,7 +118,8 @@ class MynaVectorStore:
             return embeddings.cpu().numpy()
 
     def store_track(self, file_path: str, embeddings: torch.Tensor,
-                   audio_hash: str, energy: float, waveform: List, duration: float, metadata: Optional[Dict] = None) -> str:
+                   audio_hash: str, energy: float, waveform: List, duration: float,
+                   pca_embedding: Optional[np.ndarray] = None, metadata: Optional[Dict] = None) -> str:
         """
         Store track embeddings and metadata.
 
@@ -123,6 +130,7 @@ class MynaVectorStore:
             energy: Energy value extracted from audio segments
             waveform: Waveform peaks data for visualization
             duration: Duration of the audio file in seconds
+            pca_embedding: Optional PCA-reduced embedding (16D) - computed in second pass
             metadata: Optional additional metadata
 
         Returns:
@@ -145,13 +153,20 @@ class MynaVectorStore:
         # Average embeddings if multiple samples
         embedding_vector = self._average_embeddings(embeddings)
 
+        # Prepare vectors - always include embedding768
+        vectors = {"embedding768": embedding_vector.tolist()}
+
+        # Add PCA if provided (second pass)
+        if pca_embedding is not None:
+            vectors["pca16"] = pca_embedding.tolist()
+
         # Store in QDrant
         self.client.upsert(
             collection_name=self.collection_name,
             points=[
                 PointStruct(
                     id=point_id,
-                    vector=embedding_vector.tolist(),
+                    vector=vectors,
                     payload=track_metadata
                 )
             ]
@@ -160,7 +175,8 @@ class MynaVectorStore:
         return point_id
 
     def find_similar(self, file_path: str = None, embeddings: torch.Tensor = None,
-                    limit: int = 10, score_threshold: float = 0.7) -> List[Dict]:
+                    limit: int = 10, score_threshold: float = 0.7,
+                    using: str = "embedding768") -> List[Dict]:
         """
         Find similar tracks.
 
@@ -169,6 +185,7 @@ class MynaVectorStore:
             embeddings: Query embeddings tensor (alternative to file_path)
             limit: Number of results to return
             score_threshold: Minimum similarity score
+            using: Which vector to use for search ("embedding768" or "pca16")
 
         Returns:
             List of similar tracks with metadata and scores
@@ -188,6 +205,7 @@ class MynaVectorStore:
             results = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
+                using=using,
                 limit=limit,
                 score_threshold=score_threshold
             )
@@ -196,7 +214,7 @@ class MynaVectorStore:
             points = self.client.retrieve(
                 collection_name=self.collection_name,
                 ids=[query_id],
-                with_vectors=True
+                with_vectors=[using]
             )
 
             if not points:
@@ -204,7 +222,8 @@ class MynaVectorStore:
 
             results = self.client.search(
                 collection_name=self.collection_name,
-                query_vector=points[0].vector,
+                query_vector=points[0].vector[using],
+                using=using,
                 limit=limit + 1,  # +1 to exclude self
                 score_threshold=score_threshold
             )
@@ -293,3 +312,64 @@ class MynaVectorStore:
             "points_count": info.points_count,
             "status": info.status
         }
+
+    def get_all_embeddings(self) -> Tuple[List[str], np.ndarray]:
+        """
+        Get all embedding768 vectors for PCA fitting.
+
+        Returns:
+            Tuple of (point_ids, embeddings_array)
+        """
+        all_points = []
+        scroll_result = self.client.scroll(
+            collection_name=self.collection_name,
+            limit=100,
+            with_vectors=["embedding768"]
+        )
+
+        all_points.extend(scroll_result[0])
+        next_page = scroll_result[1]
+
+        while next_page is not None:
+            scroll_result = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=100,
+                offset=next_page,
+                with_vectors=["embedding768"]
+            )
+            all_points.extend(scroll_result[0])
+            next_page = scroll_result[1]
+
+        # Extract IDs and vectors
+        point_ids = [point.id for point in all_points]
+        embeddings = np.array([point.vector["embedding768"] for point in all_points])
+
+        return point_ids, embeddings
+
+    def update_pca_vectors(self, point_ids: List[str], pca_vectors: np.ndarray):
+        """
+        Update PCA vectors for multiple points.
+
+        Args:
+            point_ids: List of point IDs to update
+            pca_vectors: Array of PCA vectors (shape: [n_points, 16])
+        """
+        # Update in batches
+        batch_size = 100
+        for i in range(0, len(point_ids), batch_size):
+            batch_ids = point_ids[i:i + batch_size]
+            batch_vectors = pca_vectors[i:i + batch_size]
+
+            points = []
+            for pid, pca_vec in zip(batch_ids, batch_vectors):
+                points.append(
+                    PointStruct(
+                        id=pid,
+                        vector={"pca16": pca_vec.tolist()}
+                    )
+                )
+
+            self.client.update_vectors(
+                collection_name=self.collection_name,
+                points=points
+            )
