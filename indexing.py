@@ -20,21 +20,13 @@ from qdrant_utils import is_qdrant_running, wait_for_qdrant
 def connect_to_qdrant(qdrant_url: str) -> MynaVectorStore:
     """
     Connect to QDrant vector store with automatic service installation.
-
-    Args:
-        qdrant_url: QDrant server URL
-
-    Returns:
-        MynaVectorStore: Connected vector store instance
-
-    Raises:
-        Exception: If connection fails
     """
     success = qdrant_url.lower() != 'none' and is_qdrant_running(qdrant_url)
     if not success:
-        print(f"XX QDrant is not running at {qdrant_url}")
+        print(f"Warning: QDrant is not running at {qdrant_url}")
         # Only prompt for localhost (not remote servers)
         if qdrant_url == 'http://localhost:6333':
+            print(f"Attempting to install QDrant as a service...")
             if _prompt_qdrant_install():
                 if _install_qdrant_service():
                     # Give QDrant a moment to start
@@ -49,13 +41,6 @@ def connect_to_qdrant(qdrant_url: str) -> MynaVectorStore:
 
 def _prompt_qdrant_install() -> bool:
     """Ask user if they want to install QDrant as a service"""
-    print("\n🔍 QDrant vector database is not running.")
-    print("QDrant enables:")
-    print("  • Storing music embeddings permanently")
-    print("  • Finding similar tracks across your collection")
-    print("  • Building music recommendation systems")
-    print("  • Data visualization and analysis")
-
     while True:
         response = input("\nWould you like to install QDrant as a startup service? (y/n): ").lower().strip()
         if response in ['y', 'yes']:
@@ -303,7 +288,7 @@ def compute_pca_for_all(vector_store: MynaVectorStore) -> bool:
         # Update all tracks with PCA vectors
         print("Updating tracks with PCA vectors...")
         vector_store.update_pca_vectors(point_ids, pca_vectors)
-        
+
         # Set has_pca flag for all updated tracks
         for point_id in point_ids:
             vector_store.client.set_payload(
@@ -318,39 +303,6 @@ def compute_pca_for_all(vector_store: MynaVectorStore) -> bool:
     except Exception as e:
         print(f"❌ Error computing PCA: {e}")
         return False
-
-
-def get_track_status(track_info: Dict) -> str:
-    """
-    Determine track processing status based on available data.
-
-    Args:
-        track_info: Track information from QDrant
-
-    Returns:
-        str: Status string ("ready", "pca_pending", "processing", "queued", "failed")
-    """
-    if not track_info:
-        return "not_found"
-
-    # Check for processing errors
-    if "error" in track_info:
-        return "failed"
-
-    # Use boolean flags for efficiency, fall back to vector checking
-    has_pca = track_info.get("has_pca", False) or ("pca16" in track_info.get("vectors", {}))
-    has_embeddings = track_info.get("has_embeddings", False) or ("embedding768" in track_info.get("vectors", {}))
-    has_waveform = "waveform" in track_info
-    has_metadata = bool(track_info.get("title"))
-
-    if has_pca:
-        return "ready"
-    elif has_embeddings:
-        return "pca_pending"  # Has embeddings but no PCA yet
-    elif has_waveform or has_metadata:
-        return "processing"  # Has some data, still computing embeddings
-    else:
-        return "queued"
 
 
 # Progress callback type for compatibility
