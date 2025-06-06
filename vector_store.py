@@ -95,8 +95,9 @@ class MynaVectorStore:
     def _create_file_hash(self, file_path: str) -> str:
         """Create hash of file for deduplication"""
         stat = os.stat(file_path)
-        # Hash based on file path, size, and modification time
-        hash_input = f"{file_path}_{stat.st_size}_{stat.st_mtime}"
+        # Hash based on file path, size, and modification time (integer seconds)
+        mtime_seconds = int(stat.st_mtime)
+        hash_input = f"{file_path}_{stat.st_size}_{mtime_seconds}"
         return hashlib.md5(hash_input.encode()).hexdigest()
 
 
@@ -262,6 +263,7 @@ class MynaVectorStore:
     def get_track_info(self, file_path: str) -> Optional[Dict]:
         """Get stored track information"""
         track_id = self._create_file_hash(file_path)
+        print("looking for track_id", track_id)
         points = self.client.retrieve(
             collection_name=self.collection_name,
             ids=[track_id],

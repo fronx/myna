@@ -128,10 +128,10 @@ def main():
     parser.add_argument('--model-type', default='hybrid', choices=['square', 'vertical', 'hybrid'],
                        help='Myna model type')
     parser.add_argument('--daemon', action='store_true',
-                       help='Run continuously as daemon, checking for new work every 30 seconds')
+                       help='Run continuously as daemon, checking for new work every 1 seconds')
     parser.add_argument('--max-tracks', type=int,
                        help='Maximum number of tracks to process per cycle')
-    parser.add_argument('--sleep-interval', type=int, default=30,
+    parser.add_argument('--sleep-interval', type=int, default=1,
                        help='Sleep interval in daemon mode (seconds)')
 
     args = parser.parse_args()
