@@ -4,12 +4,12 @@ QDrant vector store for Myna embeddings
 
 import os
 import hashlib
-from typing import Dict, List, Optional, Tuple, Union
-from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.conversions.common_types import PointId, Points
 from mutagen import File as MutagenFile
 
 
@@ -118,161 +118,78 @@ class MynaVectorStore:
             # Single sample
             return embeddings.cpu().numpy()
 
-    def store_track(self, file_path: str, embeddings: torch.Tensor,
-                   audio_hash: str, energy: float, waveform: List, duration: float,
-                   pca_embedding: Optional[np.ndarray] = None, metadata: Optional[Dict] = None) -> str:
-        """
-        Store track embeddings and metadata.
-
-        Args:
-            file_path: Path to audio file
-            embeddings: Myna embeddings tensor
-            audio_hash: Hash of the audio samples used for embedding generation
-            energy: Energy value extracted from audio segments
-            waveform: Waveform peaks data for visualization
-            duration: Duration of the audio file in seconds
-            pca_embedding: Optional PCA-reduced embedding (16D) - computed in second pass
-            metadata: Optional additional metadata
-
-        Returns:
-            str: Point ID in QDrant
-        """
-        # Create unique ID based on file
+    def exists(self, file_path: str) -> bool:
+        """Check if track exists in vector store"""
         point_id = self._create_file_hash(file_path)
+        points = self.client.retrieve(
+            collection_name=self.collection_name,
+            ids=[point_id],
+            with_payload=False
+        )
+        return len(points) > 0
 
-        # Extract metadata
-        track_metadata = self._extract_metadata(file_path)
-        if metadata:
-            track_metadata.update(metadata)
 
-        # Add audio sample hash, energy, waveform, and duration
-        track_metadata["audio_sample_hash"] = audio_hash
-        track_metadata["energy"] = energy
-        track_metadata["waveform"] = waveform
-        track_metadata["duration"] = duration
+    def store_track(self, track: PointStruct, audio_hash: str, energy: float, waveform: List, duration: float,
+                   embeddings: torch.Tensor) -> str:
+        track.payload["audio_sample_hash"] = audio_hash
+        track.payload["energy"] = energy
+        track.payload["waveform"] = waveform
+        track.payload["duration"] = duration
 
         # Average embeddings if multiple samples
         embedding_vector = self._average_embeddings(embeddings)
+        track.vector["embedding768"] = embedding_vector.tolist()
+        track.payload["has_embeddings"] = True
 
-        # Check if point already exists to preserve vectors
-        try:
-            existing_points = self.client.retrieve(
-                collection_name=self.collection_name,
-                ids=[point_id],
-                with_vectors=True
-            )
-            existing_vectors = existing_points[0].vector if existing_points else None
-        except:
-            existing_vectors = None
-
-        # Prepare vectors - always include embedding768
-        vectors = {"embedding768": embedding_vector.tolist()}
-
-        # If updating existing point, preserve pca16 if not provided
-        if existing_vectors and isinstance(existing_vectors, dict):
-            if pca_embedding is None and "pca16" in existing_vectors:
-                vectors["pca16"] = existing_vectors["pca16"]
-
-        # Add PCA if provided (second pass)
-        if pca_embedding is not None:
-            vectors["pca16"] = pca_embedding.tolist()
-
-        # Store in QDrant
         self.client.upsert(
             collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=point_id,
-                    vector=vectors,
-                    payload=track_metadata
-                )
-            ]
+            points=[track]
         )
 
-        return point_id
-
-    def find_similar(self, file_path: str = None, embeddings: torch.Tensor = None,
-                    limit: int = 10, score_threshold: float = 0.7,
-                    using: str = "embedding768") -> List[Dict]:
-        """
-        Find similar tracks.
-
-        Args:
-            file_path: Path to query audio file (if stored)
-            embeddings: Query embeddings tensor (alternative to file_path)
-            limit: Number of results to return
-            score_threshold: Minimum similarity score
-            using: Which vector to use for search ("embedding768" or "pca16")
-
-        Returns:
-            List of similar tracks with metadata and scores
-        """
-        if file_path:
-            # Search by stored track
-            query_id = self._create_file_hash(file_path)
-            query_vector = None
-        elif embeddings is not None:
-            # Search by embedding vector
-            query_id = None
-            query_vector = self._average_embeddings(embeddings).tolist()
-        else:
-            raise ValueError("Either file_path or embeddings must be provided")
-
-        if query_vector:
-            results = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                using=using,
-                limit=limit,
-                score_threshold=score_threshold
-            )
-        else:
-            # Get the stored point first
-            points = self.client.retrieve(
-                collection_name=self.collection_name,
-                ids=[query_id],
-                with_vectors=[using]
-            )
-
-            if not points:
-                raise ValueError(f"Track not found: {file_path}")
-
-            results = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=points[0].vector[using],
-                using=using,
-                limit=limit + 1,  # +1 to exclude self
-                score_threshold=score_threshold
-            )
-
-            # Remove the query track itself
-            results = [r for r in results if r.id != query_id][:limit]
-
-        # Format results
-        similar_tracks = []
-        for result in results:
-            track_info = {
-                "id": result.id,
-                "score": result.score,
-                "metadata": result.payload
-            }
-            similar_tracks.append(track_info)
-
-        return similar_tracks
-
-    def get_track_info(self, file_path: str) -> Optional[Dict]:
-        """Get stored track information"""
-        track_id = self._create_file_hash(file_path)
-        print("looking for track_id", track_id)
-        points = self.client.retrieve(
+    def mark_as_failed(self, track: PointStruct, error: str) -> str:
+        track.payload["error"] = error
+        self.client.upsert(
             collection_name=self.collection_name,
-            ids=[track_id],
-            with_payload=True
+            points=[track]
         )
 
-        if points:
-            return points[0].payload
+    def update_pca(self, tracks: List[PointStruct], pca_vectors: np.ndarray) -> None:
+        """Update PCA vectors for a list of tracks"""
+        for i, track in enumerate(tracks):
+            track.vector["pca16"] = pca_vectors[i].tolist()
+            track.payload["has_pca"] = True
+
+        # Process tracks in batches of 100 to avoid timeouts
+        batch_size = 5
+        for i in range(0, len(tracks), batch_size):
+            batch = tracks[i:i + batch_size]
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=batch
+            )
+
+
+    def _record_to_point_struct(self, record) -> PointStruct:
+        """Convert a Record to a PointStruct"""
+        return PointStruct(
+            id=record.id,
+            vector=record.vector or {},
+            payload=record.payload or {}
+        )
+
+    def get_track(self, file_path: str) -> Optional[PointStruct]:
+        """Get point by file path"""
+        point_id = self._create_file_hash(file_path)
+        records = self.client.retrieve(
+            collection_name=self.collection_name,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=True
+        )
+        if records:
+            return self._record_to_point_struct(records[0])
         return None
+
 
     def delete_track(self, file_path: str) -> bool:
         """Delete track from vector store"""
@@ -283,42 +200,6 @@ class MynaVectorStore:
         )
         return result.operation_id is not None
 
-    def needs_reprocessing(self, file_path: str, current_audio_hash: str) -> bool:
-        """
-        Check if a file needs reprocessing by comparing audio content hashes and checking for energy data.
-
-        Args:
-            file_path: Path to audio file
-            current_audio_hash: Current hash of the audio samples
-
-        Returns:
-            bool: True if file needs reprocessing, False if already up-to-date
-        """
-        track_info = self.get_track_info(file_path)
-
-        if not track_info:
-            # No existing data, needs processing
-            return True
-
-        stored_audio_hash = track_info.get("audio_sample_hash")
-        if not stored_audio_hash:
-            # No hash stored, needs reprocessing
-            return True
-
-        if "energy" not in track_info:
-            # Missing energy data, needs reprocessing
-            return True
-
-        if "waveform" not in track_info:
-            # Missing waveform data, needs reprocessing
-            return True
-
-        if "duration" not in track_info:
-            # Missing duration data, needs reprocessing
-            return True
-
-        # Compare audio content hashes
-        return stored_audio_hash != current_audio_hash
 
     def collection_info(self) -> Dict:
         """Get collection statistics"""
@@ -330,63 +211,57 @@ class MynaVectorStore:
             "status": info.status
         }
 
-    def get_all_embeddings(self) -> Tuple[List[str], np.ndarray]:
+    def pca_required(self) -> bool:
+        """Check if PCA is required for the collection"""
+        count_result = self.client.count(self.collection_name, Filter(
+            must=[
+                FieldCondition(key="has_pca", match=MatchValue(value=False))
+            ]
+        ))
+        return count_result.count > 0
+
+    def get_tracks_without_embeddings(self) -> List[PointStruct]:
         """
-        Get all embedding768 vectors for PCA fitting.
-
-        Returns:
-            Tuple of (point_ids, embeddings_array)
+        Get all tracks without embeddings.
         """
-        all_points = []
-        scroll_result = self.client.scroll(
-            collection_name=self.collection_name,
-            limit=100,
-            with_vectors=["embedding768"]
-        )
+        return self.get_filtered_tracks("has_embeddings", MatchValue(value=False))
 
-        all_points.extend(scroll_result[0])
-        next_page = scroll_result[1]
 
-        while next_page is not None:
-            scroll_result = self.client.scroll(
+    def get_tracks_with_embeddings(self) -> List[PointStruct]:
+        """
+        Get all tracks with embeddings.
+        """
+        return self.get_filtered_tracks("has_embeddings", MatchValue(value=True))
+
+
+    def get_filtered_tracks(self, key: str, match: MatchValue) -> List[PointStruct]:
+        """
+        Get all tracks that match the filter.
+        """
+        def scroll_tracks(offset: Optional[PointId]) -> Tuple[List[PointStruct], Optional[PointId]]:
+            records, next_offset = self.client.scroll(
                 collection_name=self.collection_name,
-                limit=100,
-                offset=next_page,
-                with_vectors=["embedding768"]
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key=key, match=match),
+                    ]
+                ),
+                offset=offset,
+                limit=1000,
+                with_payload=True,
+                with_vectors=True,
             )
-            all_points.extend(scroll_result[0])
+            # Convert Records to PointStructs
+            point_structs = [self._record_to_point_struct(record) for record in records]
+            return point_structs, next_offset
+
+        tracks = []
+        scroll_result = scroll_tracks(None)
+        tracks.extend(scroll_result[0])
+        next_page = scroll_result[1]
+        while next_page is not None:
+            scroll_result = scroll_tracks(next_page)
+            tracks.extend(scroll_result[0])
             next_page = scroll_result[1]
 
-        # Extract IDs and vectors
-        point_ids = [point.id for point in all_points]
-        embeddings = np.array([point.vector["embedding768"] for point in all_points])
-
-        return point_ids, embeddings
-
-    def update_pca_vectors(self, point_ids: List[str], pca_vectors: np.ndarray):
-        """
-        Update PCA vectors for multiple points.
-
-        Args:
-            point_ids: List of point IDs to update
-            pca_vectors: Array of PCA vectors (shape: [n_points, 16])
-        """
-        # Update in batches - use update_vectors to preserve existing vectors
-        batch_size = 100
-        for i in range(0, len(point_ids), batch_size):
-            batch_ids = point_ids[i:i + batch_size]
-            batch_vectors = pca_vectors[i:i + batch_size]
-
-            # Create update points with only the pca16 vector
-            points = []
-            for j, point_id in enumerate(batch_ids):
-                points.append({
-                    "id": point_id,
-                    "vector": {"pca16": batch_vectors[j].tolist()}
-                })
-
-            # Use update_vectors to only update pca16, preserving embedding768
-            self.client.update_vectors(
-                collection_name=self.collection_name,
-                points=points
-            )
+        return tracks

@@ -11,9 +11,10 @@ Processes incomplete tracks in QDrant, filling in missing:
 
 import argparse
 import time
-import sys
-from typing import List, Dict
-from myna_inference import create_inference_engine
+import os
+from typing import Dict
+from myna_inference import create_inference_engine, MynaInference
+from vector_store import MynaVectorStore
 from indexing import (
     connect_to_qdrant,
     get_incomplete_tracks,
@@ -22,101 +23,63 @@ from indexing import (
 )
 
 
-def process_incomplete_tracks(vector_store, inference, max_tracks: int = None) -> Dict[str, int]:
+def process_incomplete_tracks(vector_store: MynaVectorStore, inference: MynaInference) -> Dict[str, int]:
     """
     Process all incomplete tracks in the database.
 
     Args:
         vector_store: QDrant vector store
         inference: Myna inference engine
-        max_tracks: Maximum number of tracks to process (None = all)
 
     Returns:
         Dict with processing statistics
     """
-    print("🔍 Finding incomplete tracks...")
-    incomplete_tracks = get_incomplete_tracks(vector_store)
+    tracks = get_incomplete_tracks(vector_store)
+    stats = {"processed": 0, "failed": 0}
 
-    if not incomplete_tracks:
-        print("✅ All tracks are complete!")
-        return {"processed": 0, "failed": 0, "skipped": 0}
+    if not tracks:
+        return stats
 
-    # Limit processing if specified
-    if max_tracks and len(incomplete_tracks) > max_tracks:
-        incomplete_tracks = incomplete_tracks[:max_tracks]
-        print(f"📝 Processing first {max_tracks} of {len(get_incomplete_tracks(vector_store))} incomplete tracks")
-    else:
-        print(f"📝 Found {len(incomplete_tracks)} incomplete tracks to process")
+    print(f"Found {len(tracks)} incomplete tracks to process", flush=True)
+    for i, track in enumerate(tracks, 1):
+        file_path = track.payload["file_path"]
 
-    stats = {"processed": 0, "failed": 0, "skipped": 0}
+        print(f"\nProcessing {i}/{len(tracks)}: {file_path}", flush=True)
 
-    for i, track in enumerate(incomplete_tracks, 1):
-        file_path = track["file_path"]
-        missing_data = track["missing"]
-
-        if not file_path:
-            print(f"❌ Track {i}/{len(incomplete_tracks)}: No file path")
-            stats["failed"] += 1
-            continue
-
-        print(f"\n📁 Processing {i}/{len(incomplete_tracks)}: {file_path}")
-        print(f"   Missing: {', '.join(missing_data)}")
-
-        # Check if file still exists
-        import os
         if not os.path.exists(file_path):
-            print(f"❌ File not found: {file_path}")
+            print(f"❌ File not found: {file_path}", flush=True)
             stats["failed"] += 1
             continue
 
-        # Process the track
-        success = process_track(file_path, vector_store, inference, missing_data)
+        if track.payload.get("error"):
+            print(f"Skipping track that was marked as failed previously: {file_path}", flush=True)
+            stats["failed"] += 1
+            continue
+
+        success = process_track(file_path, vector_store, inference)
 
         if success:
             stats["processed"] += 1
-            print(f"✅ Completed: {file_path}")
+            print(f"✅ Completed: {file_path}", flush=True)
         else:
             stats["failed"] += 1
 
     return stats
 
 
-def run_worker_cycle(vector_store, inference, max_tracks: int = None) -> bool:
+def run_worker_cycle(vector_store, inference):
     """
     Run one complete worker cycle: process incomplete tracks + compute PCA.
-
-    Returns:
-        bool: True if any work was done
     """
-    print("🚀 Starting worker cycle...")
+    print("Starting worker cycle...", flush=True)
+    stats = process_incomplete_tracks(vector_store, inference)
 
-    # Process incomplete tracks
-    stats = process_incomplete_tracks(vector_store, inference, max_tracks)
+    print(f"\nProcessing complete:", flush=True)
+    print(f"   ✅ Processed: {stats['processed']}", flush=True)
+    print(f"   ❌ Failed: {stats['failed']}", flush=True)
 
-    work_done = stats["processed"] > 0
-
-    print(f"\n📊 Processing complete:")
-    print(f"   ✅ Processed: {stats['processed']}")
-    print(f"   ❌ Failed: {stats['failed']}")
-    print(f"   ⏭ Skipped: {stats['skipped']}")
-
-    # Always try to compute PCA if we have embeddings
-    if stats["processed"] > 0:
-        print("\n🔬 Computing PCA for newly processed tracks...")
-        pca_success = compute_pca_for_all(vector_store)
-        if pca_success:
-            print("✅ PCA computation complete")
-        else:
-            print("❌ PCA computation failed")
-
-    remaining = len(get_incomplete_tracks(vector_store))
-    if remaining > 0:
-        print(f"\n📋 {remaining} tracks still need processing")
-        work_done = True  # Still work to do
-    else:
-        print("\n🎉 All tracks are now complete!")
-
-    return work_done
+    if stats["processed"] > 0 or vector_store.pca_required():
+        compute_pca_for_all(vector_store, debug=True)
 
 
 def main():
@@ -128,60 +91,39 @@ def main():
     parser.add_argument('--model-type', default='hybrid', choices=['square', 'vertical', 'hybrid'],
                        help='Myna model type')
     parser.add_argument('--daemon', action='store_true',
-                       help='Run continuously as daemon, checking for new work every 1 seconds')
-    parser.add_argument('--max-tracks', type=int,
-                       help='Maximum number of tracks to process per cycle')
+                       help='Run continuously as daemon')
     parser.add_argument('--sleep-interval', type=int, default=1,
                        help='Sleep interval in daemon mode (seconds)')
 
     args = parser.parse_args()
 
-    try:
-        # Connect to QDrant
-        print(f"🔌 Connecting to QDrant at {args.qdrant_url}...")
-        vector_store = connect_to_qdrant(args.qdrant_url)
-        print(f"✅ Connected: {vector_store.collection_info()}")
+    print(f"Connecting to QDrant at {args.qdrant_url}...", flush=True)
+    vector_store = connect_to_qdrant(args.qdrant_url)
+    print(f"Connected: {vector_store.collection_info()}", flush=True)
 
-        # Initialize inference engine
-        print(f"🧠 Loading Myna model from {args.model_path}...")
-        inference = create_inference_engine(
-            model_path=args.model_path,
-            model_type=args.model_type,
-            hybrid_mode=True
-        )
-        print("✅ Model loaded successfully")
+    print(f"Loading Myna model from {args.model_path}...", flush=True)
+    inference = create_inference_engine(
+        model_path=args.model_path,
+        model_type=args.model_type,
+        hybrid_mode=True
+    )
+    print("Model loaded successfully", flush=True)
 
-        if args.daemon:
-            print(f"🔄 Running in daemon mode (checking every {args.sleep_interval}s)")
-            print("   Press Ctrl+C to stop")
+    if args.daemon:
+        print(f"Running in daemon mode", flush=True)
+        print("   Press Ctrl+C to stop", flush=True)
 
-            try:
-                while True:
-                    work_done = run_worker_cycle(vector_store, inference, args.max_tracks)
+        try:
+            while True:
+                run_worker_cycle(vector_store, inference)
+                print(f"... Sleeping for {args.sleep_interval}s ...", flush=True)
+                time.sleep(args.sleep_interval)
 
-                    if not work_done:
-                        print(f"😴 No work to do, sleeping for {args.sleep_interval}s...")
-                    else:
-                        print(f"⏱ Cycle complete, sleeping for {args.sleep_interval}s...")
+        except KeyboardInterrupt:
+            print("\nWorker stopped by user", flush=True)
 
-                    time.sleep(args.sleep_interval)
-
-            except KeyboardInterrupt:
-                print("\n👋 Worker stopped by user")
-
-        else:
-            # Single run mode
-            work_done = run_worker_cycle(vector_store, inference, args.max_tracks)
-
-            if work_done:
-                remaining = len(get_incomplete_tracks(vector_store))
-                if remaining > 0:
-                    print(f"\n💡 Run again to process remaining {remaining} tracks")
-                    sys.exit(1)  # Exit code indicates more work available
-
-    except Exception as e:
-        print(f"❌ Worker error: {e}")
-        sys.exit(2)
+    else:
+        run_worker_cycle(vector_store, inference)
 
 
 if __name__ == '__main__':

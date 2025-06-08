@@ -6,15 +6,14 @@ and QDrant operations. Extracted from index.py to enable
 background worker and other scripts.
 """
 
-import os
-import numpy as np
 from sklearn.decomposition import PCA
-from typing import Optional, Dict, List, Tuple, Callable
+from typing import Dict, List
 import torch
-
-from myna_inference import MynaInference, create_inference_engine
+import numpy as np
+from myna_inference import MynaInference
 from vector_store import MynaVectorStore
 from qdrant_utils import is_qdrant_running, wait_for_qdrant
+from qdrant_client.models import PointStruct
 
 
 def connect_to_qdrant(qdrant_url: str) -> MynaVectorStore:
@@ -63,6 +62,8 @@ def _install_qdrant_service() -> bool:
             capture_output=True,
             text=True
         )
+        print("stdout:", result.stdout)
+        print("stderr:", result.stderr)
         print("✅ QDrant service installed successfully!")
         return True
     except subprocess.CalledProcessError as e:
@@ -73,122 +74,28 @@ def _install_qdrant_service() -> bool:
         return False
 
 
-def add_files_to_queue(folder_path: str, vector_store: MynaVectorStore) -> List[str]:
+def get_incomplete_tracks(vector_store: MynaVectorStore) -> List[PointStruct]:
     """
-    Add audio files to QDrant as incomplete records (filename/path only).
-
-    Args:
-        folder_path: Path to folder containing audio files
-        vector_store: QDrant vector store
-
-    Returns:
-        List[str]: List of file paths that were added
+    Get all tracks that need processing
     """
-    # Use existing audio file discovery from myna_inference
-    inference = create_inference_engine()  # Just for file discovery
-    audio_files = inference.get_audio_files(folder_path)
-
-    added_files = []
-    for file_path in audio_files:
-        # Check if file already exists in QDrant
-        existing = vector_store.get_track_info(file_path)
-        if not existing:
-            # Add minimal record with just file info
-            metadata = {
-                "file_path": file_path,
-                "filename": os.path.basename(file_path),
-                "has_embeddings": False,  # For efficient filtering
-                "has_pca": False          # For efficient filtering
-            }
-
-            # Create a dummy point with no vectors (will be filled by worker)
-            from qdrant_client.models import PointStruct
-            point_id = vector_store._create_file_hash(file_path)
-
-            vector_store.client.upsert(
-                collection_name=vector_store.collection_name,
-                points=[
-                    PointStruct(
-                        id=point_id,
-                        vector={},  # No vectors yet
-                        payload=metadata
-                    )
-                ]
-            )
-            added_files.append(file_path)
-
-    return added_files
+    return vector_store.get_tracks_without_embeddings()
 
 
-def get_incomplete_tracks(vector_store: MynaVectorStore) -> List[Dict]:
+def compute_embeddings(melspecs: torch.Tensor, inference: MynaInference) -> torch.Tensor:
     """
-    Get all tracks that need processing (missing any required data).
+    Compute embeddings for a batch of audio samples.
     """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-    incomplete_tracks = []
-
-    # Find tracks that need embeddings (has_embeddings = false)
-    filter_no_embeddings = Filter(
-        must=[
-            FieldCondition(key="has_embeddings", match=MatchValue(value=False))
-        ]
-    )
-
-    result = vector_store.client.scroll(
-        collection_name=vector_store.collection_name,
-        scroll_filter=filter_no_embeddings,
-        limit=1000,
-        with_payload=True
-    )
-
-    for point in result[0]:
-        missing_data = []
-        payload = point.payload or {}
-
-        # Determine what's missing based on payload content
-        if not payload.get("title"):  # Missing metadata
-            missing_data.append("metadata")
-        if not payload.get("waveform"):  # Missing waveform
-            missing_data.append("waveform")
-        missing_data.append("embedding768")  # We know this is missing from filter
-        missing_data.append("pca16")  # No embeddings means no PCA either
-
-        incomplete_tracks.append({
-            "id": point.id,
-            "file_path": payload.get("file_path"),
-            "missing": missing_data,
-            "payload": payload
-        })
-
-    # Find tracks that have embeddings but need PCA (has_embeddings = true, has_pca = false)
-    filter_needs_pca = Filter(
-        must=[
-            FieldCondition(key="has_embeddings", match=MatchValue(value=True)),
-            FieldCondition(key="has_pca", match=MatchValue(value=False))
-        ]
-    )
-
-    result = vector_store.client.scroll(
-        collection_name=vector_store.collection_name,
-        scroll_filter=filter_needs_pca,
-        limit=1000,
-        with_payload=True
-    )
-
-    for point in result[0]:
-        incomplete_tracks.append({
-            "id": point.id,
-            "file_path": point.payload.get("file_path"),
-            "missing": ["pca16"],  # Only missing PCA
-            "payload": point.payload
-        })
-
-    return incomplete_tracks
+    with torch.no_grad():
+        sample_embeds = []
+        for i in range(melspecs.shape[0]):
+            sample_ms = melspecs[i].unsqueeze(0).unsqueeze(0)
+            embed = inference.model(sample_ms)
+            sample_embeds.append(embed)
+        return torch.cat(sample_embeds, dim=0)
 
 
 def process_track(file_path: str, vector_store: MynaVectorStore,
-                 inference: MynaInference, missing_data: List[str]) -> bool:
+                 inference: MynaInference) -> bool:
     """
     Process a single track, filling in missing data.
 
@@ -196,66 +103,37 @@ def process_track(file_path: str, vector_store: MynaVectorStore,
         file_path: Path to audio file
         vector_store: QDrant vector store
         inference: Myna inference engine
-        missing_data: List of data types to process
 
     Returns:
         bool: True if processing succeeded
     """
     try:
-        # Get current track info
-        current_info = vector_store.get_track_info(file_path)
-        if not current_info:
+        track = vector_store.get_track(file_path)
+        if not track:
             print(f"❌ Track not found in database: {file_path}")
             return False
 
-        # Only process if we need embeddings or waveform (metadata is handled separately)
-        if "embedding768" in missing_data or "waveform" in missing_data:
-            # Process audio file to get embeddings and waveform
-            ms, audio_hash, mean_energy, waveform_peaks, duration_seconds = inference._preprocess_audio(file_path)
+        melspecs, audio_hash, mean_energy, waveform_peaks, duration_seconds = inference.preprocess_audio(file_path)
+        embeddings = compute_embeddings(melspecs, inference)
 
-            # Run inference to get embeddings
-            with torch.no_grad():
-                sample_embeds = []
-                for i in range(ms.shape[0]):
-                    sample_ms = ms[i].unsqueeze(0).unsqueeze(0)
-                    embed = inference.model(sample_ms)
-                    sample_embeds.append(embed)
-                embeddings = torch.cat(sample_embeds, dim=0)
-
-            # Store the track with all data
-            vector_store.store_track(
-                file_path=file_path,
-                embeddings=embeddings,
-                audio_hash=audio_hash,
-                energy=mean_energy,
-                waveform=waveform_peaks,
-                duration=duration_seconds
-            )
-
-        # Update flags to indicate embeddings are now available
-        vector_store.client.set_payload(
-            collection_name=vector_store.collection_name,
-            payload={"has_embeddings": True},
-            points=[vector_store._create_file_hash(file_path)]
+        print(f"Storing track: {file_path}, {track}")
+        vector_store.store_track(track,
+            audio_hash=audio_hash,
+            energy=mean_energy,
+            waveform=waveform_peaks,
+            duration=duration_seconds,
+            embeddings=embeddings,
         )
 
         return True
 
     except Exception as e:
         print(f"❌ Error processing {file_path}: {e}")
-        # Mark as failed (keep has_embeddings = False)
-        try:
-            vector_store.client.set_payload(
-                collection_name=vector_store.collection_name,
-                payload={"error": str(e)},
-                points=[vector_store._create_file_hash(file_path)]
-            )
-        except:
-            pass
+        vector_store.mark_as_failed(track, str(e))
         return False
 
 
-def compute_pca_for_all(vector_store: MynaVectorStore) -> bool:
+def compute_pca_for_all(vector_store: MynaVectorStore, debug: bool = False) -> bool:
     """
     Compute PCA vectors for all tracks that have embeddings but no PCA.
 
@@ -265,73 +143,21 @@ def compute_pca_for_all(vector_store: MynaVectorStore) -> bool:
     Returns:
         bool: True if PCA computation succeeded
     """
-    try:
-        print("🔬 Computing PCA vectors...")
+    points = vector_store.get_tracks_with_embeddings()
+    embeddings = np.array([point.vector["embedding768"] for point in points])
 
-        # Get all embeddings
-        point_ids, embeddings = vector_store.get_all_embeddings()
-        print(f"Retrieved {len(point_ids)} embeddings for PCA")
-
-        if len(point_ids) == 0:
-            print("No embeddings found in database")
-            return False
-
-        # Fit PCA
-        pca = PCA(n_components=16)
-        pca_vectors = pca.fit_transform(embeddings)
-
-        # Show explained variance
-        explained_var = pca.explained_variance_ratio_.sum()
-        print(f"PCA explained variance ratio: {explained_var:.3f}")
-        print(f"PCA shape: {pca_vectors.shape}")
-
-        # Update all tracks with PCA vectors
-        print("Updating tracks with PCA vectors...")
-        vector_store.update_pca_vectors(point_ids, pca_vectors)
-
-        # Set has_pca flag for all updated tracks
-        for point_id in point_ids:
-            vector_store.client.set_payload(
-                collection_name=vector_store.collection_name,
-                payload={"has_pca": True},
-                points=[point_id]
-            )
-        print("✅ PCA vectors and flags updated successfully")
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Error computing PCA: {e}")
+    if len(points) == 0:
+        print("PCA: Nothing to do, no points to update")
         return False
 
+    # Use min(n_points, 16) components to avoid dimensionality issues
+    n_components = min(len(points), 16)
+    if debug:
+        print(f"PCA: Using {n_components} components")
+    pca = PCA(n_components=n_components)
+    pca_vectors = pca.fit_transform(embeddings)
 
-# Progress callback type for compatibility
-ProgressCallback = Callable[[str, bool, any, str, float, List, float], None]
-
-
-def create_simple_progress_callback(verbose: bool = True) -> ProgressCallback:
-    """
-    Create a simple progress callback for use with processing functions.
-
-    Args:
-        verbose: Whether to print progress messages
-
-    Returns:
-        ProgressCallback: Callback function
-    """
-    def progress_callback(filename: str, success: bool, result_or_error: any,
-                         audio_hash: str, mean_energy: float, waveform_peaks: List,
-                         duration_seconds: float):
-        if not verbose:
-            return
-
-        if result_or_error == "skipped":
-            print(f'⏭ {filename}: already processed (hash match)')
-        else:
-            embeddings = result_or_error
-            energy_info = f" (energy: {mean_energy:.3f})" if mean_energy is not None else ""
-            waveform_info = f", waveform: {len(waveform_peaks[0]) if waveform_peaks else 0} peaks" if waveform_peaks else ""
-            duration_info = f", duration: {duration_seconds:.1f}s" if duration_seconds is not None else ""
-            print(f'✓ {filename}: embeddings shape {embeddings.shape}{energy_info}{waveform_info}{duration_info}')
-
-    return progress_callback
+    vector_store.update_pca(points, pca_vectors)
+    if debug:
+        print("✅ PCA vectors and flags updated successfully")
+    return True

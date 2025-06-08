@@ -5,10 +5,9 @@ Myna model inference utilities
 import os
 from argparse import Namespace
 import torch
-
 from utils import get_n_frames, load_model
 from vit import SimpleViT
-from audio_utils import sample_spectrogram, get_audio_files, load_raw_audio, get_audio_info, extract_mean_energy, compute_waveform_peaks, extract_audio_segments
+from audio_utils import get_audio_files, get_audio_info, extract_mean_energy, compute_waveform_peaks, extract_audio_segments
 import essentia.standard as es
 from nnAudio.features.mel import MelSpectrogram
 
@@ -97,8 +96,7 @@ class MynaInference:
         return hasher.hexdigest()
 
 
-
-    def _preprocess_audio(self, audio_file: str, profile: bool = False):
+    def preprocess_audio(self, audio_file: str, profile: bool = False):
         """
         Preprocess audio file by extracting strategic segments and computing spectrograms.
 
@@ -121,7 +119,7 @@ class MynaInference:
 
         # Get audio info without loading full file
         original_sr, total_frames = get_audio_info(audio_file)
-        
+
         # Calculate duration in seconds
         duration_seconds = total_frames / original_sr
 
@@ -159,7 +157,7 @@ class MynaInference:
         # Compute waveform peaks for visualization
         if profile:
             waveform_start = time.perf_counter()
-        
+
         waveform_peaks = compute_waveform_peaks(audio_file, self.sample_rate)
 
         if profile:
@@ -196,62 +194,6 @@ class MynaInference:
             raise ValueError(f"No audio files found in {folder_path}")
 
         return audio_files
-
-    def process_folder(self, folder_path: str, vector_store, progress_callback=None, profile: bool = False, audio_files: list = None, force: bool = False):
-        """
-        Process all audio files in a folder.
-
-        Args:
-            folder_path: Path to folder containing audio files
-            vector_store: Vector store for checking existing embeddings and storage
-            progress_callback: Optional callback function for progress updates
-                             Called with (filename, success, result_or_error)
-            profile: Whether to output timing information for preprocessing
-            audio_files: Optional list of specific audio files to process (default: all files in folder)
-            force: Force recomputation of all tracks, ignoring existing data
-
-        Returns:
-            dict: Dictionary mapping filenames to embeddings
-        """
-        if audio_files is None:
-            audio_files = self.get_audio_files(folder_path)
-        results = {}
-
-        # Process each audio file
-        for audio_file in audio_files:
-            filename = os.path.basename(audio_file)
-
-            # Extract strategic segments and compute hash
-            ms, audio_hash, mean_energy, waveform_peaks, duration_seconds = self._preprocess_audio(audio_file, profile=profile)
-
-            # Check if file needs reprocessing based on audio content
-            if not force and not vector_store.needs_reprocessing(audio_file, audio_hash):
-                results[filename] = "skipped"
-                if progress_callback:
-                    # Get stored energy and waveform for skipped files
-                    stored_info = vector_store.get_track_info(audio_file)
-                    stored_energy = stored_info.get("energy") if stored_info else None
-                    stored_waveform = stored_info.get("waveform") if stored_info else None
-                    stored_duration = stored_info.get("duration") if stored_info else duration_seconds
-                    progress_callback(filename, True, "skipped", audio_hash, stored_energy, stored_waveform, stored_duration)
-                continue
-
-            # Run inference on the already-preprocessed spectrogram
-            with torch.no_grad():
-                # ms has shape (num_samples, n_mels, n_frames), process each sample individually
-                sample_embeds = []
-                for i in range(ms.shape[0]):
-                    sample_ms = ms[i].unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, n_mels, n_frames)
-                    embed = self.model(sample_ms)
-                    sample_embeds.append(embed)
-                embeds = torch.cat(sample_embeds, dim=0)  # Combine all embeddings
-
-            results[filename] = embeds
-
-            if progress_callback:
-                progress_callback(filename, True, embeds, audio_hash, mean_energy, waveform_peaks, duration_seconds)
-
-        return results
 
 
 def create_inference_engine(model_path: str = 'pretrained/myna-hybrid.pth',
