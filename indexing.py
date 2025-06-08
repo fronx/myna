@@ -157,6 +157,12 @@ def compute_pca_for_all(vector_store: MynaVectorStore, debug: bool = False) -> b
     pca = PCA(n_components=n_components)
     pca_vectors = pca.fit_transform(embeddings)
 
+    # Zero-pad vectors to 16 dimensions if needed
+    if n_components < 16:
+        padded_vectors = np.zeros((len(points), 16))
+        padded_vectors[:, :n_components] = pca_vectors
+        pca_vectors = padded_vectors
+
     vector_store.update_pca(points, pca_vectors)
     if debug:
         print("✅ PCA vectors and flags updated successfully")

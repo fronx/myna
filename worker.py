@@ -71,12 +71,13 @@ def run_worker_cycle(vector_store, inference):
     """
     Run one complete worker cycle: process incomplete tracks + compute PCA.
     """
-    print("Starting worker cycle...", flush=True)
+    # print("Starting worker cycle...", flush=True)
     stats = process_incomplete_tracks(vector_store, inference)
 
-    print(f"\nProcessing complete:", flush=True)
-    print(f"   ✅ Processed: {stats['processed']}", flush=True)
-    print(f"   ❌ Failed: {stats['failed']}", flush=True)
+    if stats["failed"] > 0 or stats["processed"] > 0:
+        print(f"\nProcessing complete:", flush=True)
+        print(f"   ✅ Processed: {stats['processed']}", flush=True)
+        print(f"   ❌ Failed: {stats['failed']}", flush=True)
 
     if stats["processed"] > 0 or vector_store.pca_required():
         compute_pca_for_all(vector_store, debug=True)
@@ -116,7 +117,7 @@ def main():
         try:
             while True:
                 run_worker_cycle(vector_store, inference)
-                print(f"... Sleeping for {args.sleep_interval}s ...", flush=True)
+                print(f"...", flush=True)
                 time.sleep(args.sleep_interval)
 
         except KeyboardInterrupt:

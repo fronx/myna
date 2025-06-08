@@ -100,7 +100,6 @@ class MynaVectorStore:
         hash_input = f"{file_path}_{stat.st_size}_{mtime_seconds}"
         return hashlib.md5(hash_input.encode()).hexdigest()
 
-
     def _average_embeddings(self, embeddings: torch.Tensor) -> np.ndarray:
         """
         Average multiple embeddings from strategic sampling into single vector.
@@ -131,6 +130,7 @@ class MynaVectorStore:
 
     def store_track(self, track: PointStruct, audio_hash: str, energy: float, waveform: List, duration: float,
                    embeddings: torch.Tensor) -> str:
+        track.payload.update(self._extract_metadata(track.payload["file_path"]))
         track.payload["audio_sample_hash"] = audio_hash
         track.payload["energy"] = energy
         track.payload["waveform"] = waveform
