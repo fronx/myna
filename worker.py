@@ -79,7 +79,7 @@ def run_worker_cycle(vector_store, inference):
         print(f"   ✅ Processed: {stats['processed']}", flush=True)
         print(f"   ❌ Failed: {stats['failed']}", flush=True)
 
-    if stats["processed"] > 0 or vector_store.pca_required():
+    if stats["processed"] > 0:
         compute_pca_for_all(vector_store, debug=True)
 
 
