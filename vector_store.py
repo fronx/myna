@@ -252,7 +252,7 @@ class MynaVectorStore:
                     ]
                 ),
                 offset=offset,
-                limit=1000,
+                limit=100,
                 with_payload=True,
                 with_vectors=True,
             )
