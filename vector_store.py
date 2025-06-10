@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, PointVectors, Filter, FieldCondition, MatchValue
 from qdrant_client.conversions.common_types import PointId, Points
 from mutagen import File as MutagenFile
 
@@ -159,13 +159,18 @@ class MynaVectorStore:
             track.vector["pca16"] = pca_vectors[i].tolist()
             track.payload["has_pca"] = True
 
-        # Process tracks in batches of 100 to avoid timeouts
-        batch_size = 5
+        # Process tracks in batches of 10 to avoid timeouts
+        batch_size = 10
         for i in range(0, len(tracks), batch_size):
-            batch = tracks[i:i + batch_size]
-            self.client.upsert(
+            batch = [ PointVectors(id=track.id, vector={"pca16": track.vector["pca16"]}) for track in tracks[i:i + batch_size] ]
+            self.client.update_vectors(
                 collection_name=self.collection_name,
                 points=batch
+            )
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload={"has_pca": True},
+                points=[track.id for track in tracks[i:i + batch_size]]
             )
 
 
