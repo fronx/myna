@@ -10,6 +10,9 @@ from sklearn.decomposition import PCA
 from typing import Dict, List
 import torch
 import numpy as np
+import os
+import tempfile
+import requests
 from myna_inference import MynaInference
 from vector_store import MynaVectorStore
 from qdrant_utils import is_qdrant_running, wait_for_qdrant
@@ -94,8 +97,48 @@ def compute_embeddings(melspecs: torch.Tensor, inference: MynaInference) -> torc
         return torch.cat(sample_embeds, dim=0)
 
 
-def process_track(file_path: str, vector_store: MynaVectorStore,
-                 inference: MynaInference) -> bool:
+def download_preview_url(preview_url: str) -> str:
+    """
+    Download Apple Music preview to a temporary file.
+
+    Args:
+        preview_url: URL of the Apple Music preview
+
+    Returns:
+        Path to temporary file
+    """
+    response = requests.get(preview_url, stream=True)
+    response.raise_for_status()
+
+    # Create temporary file with .m4a extension
+    temp_file = tempfile.NamedTemporaryFile(suffix='.m4a', delete=False)
+    for chunk in response.iter_content(chunk_size=8192):
+        temp_file.write(chunk)
+    temp_file.close()
+
+    return temp_file.name
+
+
+def process_apple_music_track(track, vector_store: MynaVectorStore, inference: MynaInference) -> bool:
+    temp_file = None
+    preview_url = track.payload.get("apple_music_preview_url")
+    try:
+        print(f"Downloading preview from: {preview_url}")
+        temp_file = download_preview_url(preview_url)
+        return process_track(track, temp_file, vector_store, inference, is_local_file=False)
+
+    except Exception as e:
+        print(f"❌ Error processing Apple Music track: {e}")
+        return False
+
+    finally:
+        # Clean up temporary file
+        if temp_file and os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+
+def process_track(track, file_path: str, vector_store: MynaVectorStore,
+                 inference: MynaInference, is_local_file: bool = True) -> bool:
     """
     Process a single track, filling in missing data.
 
@@ -108,11 +151,6 @@ def process_track(file_path: str, vector_store: MynaVectorStore,
         bool: True if processing succeeded
     """
     try:
-        track = vector_store.get_track(file_path)
-        if not track:
-            print(f"❌ Track not found in database: {file_path}")
-            return False
-
         melspecs, audio_hash, mean_energy, waveform_peaks, duration_seconds = inference.preprocess_audio(file_path)
         embeddings = compute_embeddings(melspecs, inference)
 
@@ -120,11 +158,10 @@ def process_track(file_path: str, vector_store: MynaVectorStore,
         vector_store.store_track(track,
             audio_hash=audio_hash,
             energy=mean_energy,
-            waveform=waveform_peaks,
-            duration=duration_seconds,
+            waveform=waveform_peaks if is_local_file else None,
+            duration=duration_seconds if is_local_file else None,
             embeddings=embeddings,
         )
-
         return True
 
     except Exception as e:

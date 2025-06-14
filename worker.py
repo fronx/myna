@@ -19,6 +19,7 @@ from indexing import (
     connect_to_qdrant,
     get_incomplete_tracks,
     process_track,
+    process_apple_music_track,
     compute_pca_for_all
 )
 
@@ -42,7 +43,28 @@ def process_incomplete_tracks(vector_store: MynaVectorStore, inference: MynaInfe
 
     print(f"Found {len(tracks)} incomplete tracks to process", flush=True)
     for i, track in enumerate(tracks, 1):
-        file_path = track.payload["file_path"]
+        # Check if this is an Apple Music track with preview URL
+        if track.payload.get("apple_music_preview_url"):
+            title = track.payload.get("title", "Unknown")
+            artist = track.payload.get("artist", "Unknown")
+            print(f"\nProcessing {i}/{len(tracks)}: Apple Music - {title} by {artist}", flush=True)
+
+            success = process_apple_music_track(track, vector_store, inference)
+
+            if success:
+                stats["processed"] += 1
+                print(f"✅ Completed: Apple Music - {title} by {artist}", flush=True)
+            else:
+                stats["failed"] += 1
+            continue
+
+        # Regular file-based track processing
+        file_path = track.payload.get("file_path", "")
+
+        if not file_path:
+            print(f"❌ No file path or preview URL for track", flush=True)
+            stats["failed"] += 1
+            continue
 
         print(f"\nProcessing {i}/{len(tracks)}: {file_path}", flush=True)
 
@@ -56,7 +78,7 @@ def process_incomplete_tracks(vector_store: MynaVectorStore, inference: MynaInfe
             stats["failed"] += 1
             continue
 
-        success = process_track(file_path, vector_store, inference)
+        success = process_track(track, file_path, vector_store, inference)
 
         if success:
             stats["processed"] += 1
