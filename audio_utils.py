@@ -13,6 +13,8 @@ from nnAudio.features.mel import MelSpectrogram
 import essentia.standard as es
 from statistics import mean
 import warnings
+import subprocess
+from typing import List
 
 
 def get_audio_info(filename: str):
@@ -104,7 +106,7 @@ def load_raw_audio(filename: str, target_sr: int = 16000, profile: bool = False,
             signal = torch.from_numpy(signal_np).unsqueeze(0)
         else:
             signal = torch.from_numpy(signal_np)
-            
+
         # Handle empty signals - this typically indicates metadata inconsistencies
         # where the file's reported duration exceeds its actual audio content
         if signal.numel() == 0:
@@ -214,11 +216,11 @@ def extract_mean_energy(audio_segments: list, energy_extractor: es.Energy) -> fl
     return mean(normalized_energies)
 
 
-def load_audio_segment_with_fallback(filename: str, target_sr: int, start_frame: int, 
+def load_audio_segment_with_fallback(filename: str, target_sr: int, start_frame: int,
                                    num_frames: int, profile: bool = False):
     """
     Load audio segment, returning None if segment is beyond actual file content.
-    
+
     Handles metadata inconsistencies where files report longer duration than actual audio.
     """
     try:
@@ -238,13 +240,13 @@ def extract_audio_segments(filename: str, total_frames: int, original_sr: int, t
                          n_samples: int, mel_transform, n_frames: int, profile: bool = False):
     """
     Extract audio segments from strategic positions in the track for robust analysis.
-    
-    Uses a "record store sampling" approach - taking segments from 15%, 35%, 55%, 
+
+    Uses a "record store sampling" approach - taking segments from 15%, 35%, 55%,
     and 75% positions to avoid intro/outro and capture the song's core content.
-    
-    Handles files with metadata inconsistencies gracefully by skipping segments 
+
+    Handles files with metadata inconsistencies gracefully by skipping segments
     that extend beyond the actual audio content.
-    
+
     Args:
         filename: Path to audio file
         total_frames: Total frames reported in metadata
@@ -254,22 +256,22 @@ def extract_audio_segments(filename: str, total_frames: int, original_sr: int, t
         mel_transform: Mel spectrogram transform function
         n_frames: Number of frames per sample for spectrograms
         profile: Whether to output timing information
-        
+
     Returns:
         tuple: (segment_spectrograms, audio_segments) where both are lists
               containing the successfully extracted segments
     """
     segment_positions = [0.15, 0.35, 0.55, 0.75]
     extract_duration_samples = max(n_samples, int(0.1 * total_frames))
-    
+
     segment_spectrograms = []
     audio_segments = []
-    
+
     for position in segment_positions:
         # Calculate segment boundaries in original sample rate
         start_frame = int(position * total_frames)
         num_frames = min(extract_duration_samples, total_frames - start_frame)
-        
+
         # Skip segments that are too small or go beyond the file
         if num_frames <= 0 or start_frame >= total_frames:
             if profile:
@@ -280,7 +282,7 @@ def extract_audio_segments(filename: str, total_frames: int, original_sr: int, t
         segment = load_audio_segment_with_fallback(
             filename, target_sr, start_frame, num_frames, profile
         )
-        
+
         if segment is None:
             # Segment was beyond actual file content (metadata mismatch)
             if profile:
@@ -297,55 +299,186 @@ def extract_audio_segments(filename: str, total_frames: int, original_sr: int, t
         # Use sample_spectrogram to get exactly the right frames (just like original)
         sampled_ms = sample_spectrogram(segment_ms, n_frames)
         segment_spectrograms.append(sampled_ms[0])  # Take first (and only) sample: (64, 96)
-        
+
     return segment_spectrograms, audio_segments
 
 
 def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pixel: int = 512) -> list:
     """
     Compute waveform peaks for WaveSurfer visualization using vectorized NumPy operations.
-    
+
     Args:
         filename: Path to audio file
         target_sr: Target sample rate for processing
         samples_per_pixel: Number of audio samples per waveform pixel
-    
+
     Returns:
         list: Waveform peaks data as list of lists (one per channel)
     """
     # Load full audio file
     signal = load_raw_audio(filename, target_sr)
-    
+
     # Ensure we have shape (channels, samples)
     if signal.dim() == 1:
         signal = signal.unsqueeze(0)  # Add channel dimension
-    
+
     channels = signal.shape[0]
     total_samples = signal.shape[1]
-    
+
     # Calculate number of peaks based on samples per pixel
     num_peaks = total_samples // samples_per_pixel
     if num_peaks == 0:
         num_peaks = 1
-    
+
     peaks_data = []
-    
+
     for channel in range(channels):
         channel_data = signal[channel].numpy()
-        
+
         # Vectorized peak computation using reshape and max
         if total_samples >= samples_per_pixel:
             # Trim to exact multiple of samples_per_pixel for efficient reshaping
             trimmed_length = num_peaks * samples_per_pixel
             trimmed_data = channel_data[:trimmed_length]
-            
+
             # Reshape and compute max absolute value per segment (vectorized)
             reshaped = trimmed_data.reshape(num_peaks, samples_per_pixel)
             peaks = np.max(np.abs(reshaped), axis=1).tolist()
         else:
             # Fallback for very short audio
             peaks = [float(np.max(np.abs(channel_data))) if len(channel_data) > 0 else 0.0]
-        
+
         peaks_data.append(peaks)
-    
+
     return peaks_data
+
+
+# === Performance-optimized helpers (added June 2025) ===
+
+# Cache of lazily-constructed resamplers keyed by (orig_sr, new_sr)
+_RESAMPLERS: dict[tuple[int, int], T.Resample] = {}
+
+# Lazily-constructed global GPU mel-spectrogram transform
+_MEL: T.MelSpectrogram | None = None
+
+
+def _get_resampler(orig_sr: int, new_sr: int) -> T.Resample:
+    """Return (and cache) a torchaudio Resample module for the given rates."""
+    key = (orig_sr, new_sr)
+    if key not in _RESAMPLERS:
+        _RESAMPLERS[key] = T.Resample(orig_freq=orig_sr, new_freq=new_sr)
+    return _RESAMPLERS[key]
+
+
+def decode_mono_resampled(path: str, sr_out: int = 16000) -> torch.Tensor:
+    """Decode **once** with torchaudio, convert to mono, and resample if required.
+
+    Args:
+        path: Path to audio file.
+        sr_out: Target sample-rate (default 16 kHz).
+
+    Returns:
+        1-D float32 torch.Tensor containing the audio samples at `sr_out`.
+    """
+    # --- Decode ---
+    wav, sr = torchaudio.load(path)
+
+    # --- Mixdown to mono ---
+    if wav.shape[0] > 1:
+        wav = wav.mean(0, keepdim=True)
+
+    # --- Resample if needed ---
+    if sr != sr_out:
+        resampler = _get_resampler(sr, sr_out)
+        wav = resampler(wav)
+
+    return wav.squeeze(0)
+
+
+def ffmpeg_decode(path: str, sr: int = 16000) -> torch.Tensor:
+    """Optional: faster decode via ffmpeg stdout piping. Uses float32 PCM."""
+    cmd = [
+        "ffmpeg", "-v", "error", "-nostdin", "-i", path,
+        "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"
+    ]
+    raw = subprocess.check_output(cmd)
+    np_audio = np.frombuffer(raw, dtype=np.float32)
+    return torch.from_numpy(np_audio)
+
+
+# ----------------------------------------------------------------------------
+# Window utilities
+# ----------------------------------------------------------------------------
+
+def sample_windows(
+    wav: torch.Tensor,
+    sr: int,
+    win_sec: float = 3.0,
+    positions: List[float] | None = None,
+) -> torch.Tensor:
+    """Slice fixed-length windows from a waveform at given relative positions.
+
+    Args:
+        wav: 1-D tensor containing audio samples.
+        sr:   Sample rate of `wav`.
+        win_sec: Duration of each window (seconds).
+        positions: List of relative [0–1] positions at which to centre windows.
+
+    Returns:
+        Tensor of shape (N, S) where S = win_sec * sr and N = len(positions).
+    """
+    if positions is None:
+        positions = [0.15, 0.35, 0.55, 0.75]
+
+    win_samples = int(win_sec * sr)
+    total_samples = wav.shape[-1]
+
+    if total_samples < win_samples:
+        # Pad (right) to minimum length
+        pad_len = win_samples - total_samples
+        wav = torch.nn.functional.pad(wav, (0, pad_len))
+        total_samples = win_samples
+
+    windows = []
+    for pos in positions:
+        start = int(pos * (total_samples - win_samples))
+        end = start + win_samples
+        window = wav[start:end]
+        windows.append(window)
+
+    return torch.stack(windows)
+
+
+# ----------------------------------------------------------------------------
+# Batched Mel-spectrogram on GPU
+# ----------------------------------------------------------------------------
+
+def _init_mel() -> T.MelSpectrogram:
+    """Construct and memoise the global GPU MelSpectrogram transform."""
+    global _MEL
+    if _MEL is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _MEL = T.MelSpectrogram(
+            sample_rate=16000,
+            n_mels=64,
+            hop_length=320,
+            f_min=20,
+            f_max=8000,
+        ).to(device)
+    return _MEL
+
+
+def mel_batch(windows: torch.Tensor) -> torch.Tensor:
+    """Compute mel-spectrograms for a batch of windows on the GPU.
+
+    Args:
+        windows: Tensor of shape (N, S), *already on the desired device*.
+
+    Returns:
+        Tensor of shape (N, 64, 96) on the same device as the transform.
+    """
+    mel = _init_mel()
+    # Ensure channel dim for convolution
+    return mel(windows.unsqueeze(1))
+
+# === End of performance helpers ===

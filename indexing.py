@@ -86,15 +86,20 @@ def get_incomplete_tracks(vector_store: MynaVectorStore) -> List[PointStruct]:
 
 def compute_embeddings(melspecs: torch.Tensor, inference: MynaInference) -> torch.Tensor:
     """
-    Compute embeddings for a batch of audio samples.
+    Vectorised embedding computation.
+
+    Args:
+        melspecs: Tensor of shape (B, n_mels, n_frames)
+        inference: Active `MynaInference` instance.
+
+    Returns:
+        Tensor of shape (B, embed_dim) containing embeddings for the batch.
     """
     with torch.no_grad():
-        sample_embeds = []
-        for i in range(melspecs.shape[0]):
-            sample_ms = melspecs[i].unsqueeze(0).unsqueeze(0)
-            embed = inference.model(sample_ms)
-            sample_embeds.append(embed)
-        return torch.cat(sample_embeds, dim=0)
+        batch = melspecs.unsqueeze(1)
+        device = next(inference.model.parameters()).device
+        batch = batch.to(device)
+        return inference.model(batch)
 
 
 def download_preview_url(preview_url: str) -> str:
@@ -107,16 +112,14 @@ def download_preview_url(preview_url: str) -> str:
     Returns:
         Path to temporary file
     """
-    response = requests.get(preview_url, stream=True)
-    response.raise_for_status()
+    import requests, tempfile
 
-    # Create temporary file with .m4a extension
-    temp_file = tempfile.NamedTemporaryFile(suffix='.m4a', delete=False)
-    for chunk in response.iter_content(chunk_size=8192):
-        temp_file.write(chunk)
-    temp_file.close()
-
-    return temp_file.name
+    with requests.get(preview_url, stream=True, timeout=10) as resp:
+        resp.raise_for_status()
+        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+            return f.name
 
 
 def process_apple_music_track(track, vector_store: MynaVectorStore, inference: MynaInference) -> bool:
