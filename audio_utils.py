@@ -14,7 +14,7 @@ import essentia.standard as es
 from statistics import mean
 import warnings
 import subprocess
-from typing import List
+from typing import List, Optional
 
 
 def get_audio_info(filename: str):
@@ -236,69 +236,53 @@ def load_audio_segment_with_fallback(filename: str, target_sr: int, start_frame:
             raise
 
 
-def extract_audio_segments(filename: str, total_frames: int, original_sr: int, target_sr: int,
-                         n_samples: int, mel_transform, n_frames: int, profile: bool = False):
+def extract_audio_segments(
+    filename: str,
+    total_frames: int,
+    original_sr: int,
+    target_sr: int,
+    n_samples: int,
+    mel_transform,
+    n_frames: int,
+    profile: bool = False,
+):
+    """Optimised segment extraction: single decode, then slice windows in RAM.
+
+    We now load the entire track once using `decode_mono_resampled` and then
+    create fixed-length windows at strategic positions. This eliminates multiple
+    disk decodes and dramatically speeds up the pipeline.
     """
-    Extract audio segments from strategic positions in the track for robust analysis.
 
-    Uses a "record store sampling" approach - taking segments from 15%, 35%, 55%,
-    and 75% positions to avoid intro/outro and capture the song's core content.
+    if profile:
+        import time
+        decode_start = time.perf_counter()
 
-    Handles files with metadata inconsistencies gracefully by skipping segments
-    that extend beyond the actual audio content.
+    # --- Decode once ---
+    wav = decode_mono_resampled(filename, sr_out=target_sr)
 
-    Args:
-        filename: Path to audio file
-        total_frames: Total frames reported in metadata
-        original_sr: Original sample rate of the file
-        target_sr: Target sample rate for processing
-        n_samples: Number of samples per embedding chunk
-        mel_transform: Mel spectrogram transform function
-        n_frames: Number of frames per sample for spectrograms
-        profile: Whether to output timing information
+    if profile:
+        decode_time = time.perf_counter() - decode_start
+        print(f"    Full decode + resample: {decode_time:.3f}s (len={wav.shape[-1]/target_sr:.1f}s)")
 
-    Returns:
-        tuple: (segment_spectrograms, audio_segments) where both are lists
-              containing the successfully extracted segments
-    """
-    segment_positions = [0.15, 0.35, 0.55, 0.75]
-    extract_duration_samples = max(n_samples, int(0.1 * total_frames))
+    # --- Slice windows ---
+    windows = sample_windows(wav, target_sr, win_sec=n_samples / target_sr)
+
+    # Silence unused param warning (kept for backward compatibility)
+    _ = mel_transform
+
+    # --- Compute batched mel on GPU ---
+    specs = mel_batch(windows).cpu()  # (N, 64, frames)
 
     segment_spectrograms = []
     audio_segments = []
 
-    for position in segment_positions:
-        # Calculate segment boundaries in original sample rate
-        start_frame = int(position * total_frames)
-        num_frames = min(extract_duration_samples, total_frames - start_frame)
+    for spec, window in zip(specs, windows):
+        audio_segments.append(window)
 
-        # Skip segments that are too small or go beyond the file
-        if num_frames <= 0 or start_frame >= total_frames:
-            if profile:
-                print(f"    Skipping segment at {position:.1%}: insufficient audio data")
-            continue
-
-        # Load segment with robust error handling
-        segment = load_audio_segment_with_fallback(
-            filename, target_sr, start_frame, num_frames, profile
-        )
-
-        if segment is None:
-            # Segment was beyond actual file content (metadata mismatch)
-            if profile:
-                print(f"    Skipping segment at {position:.1%}: beyond actual file content")
-            continue
-
-        # Store raw audio segment for energy extraction
-        audio_segments.append(segment)
-
-        # Convert to mel spectrogram (this will have variable frames)
-        segment_ms = mel_transform(segment.unsqueeze(0)).squeeze(0)
-        segment_ms = segment_ms.unsqueeze(0)  # Shape: (1, n_mels, frames)
-
-        # Use sample_spectrogram to get exactly the right frames (just like original)
-        sampled_ms = sample_spectrogram(segment_ms, n_frames)
-        segment_spectrograms.append(sampled_ms[0])  # Take first (and only) sample: (64, 96)
+        # Ensure exact frame count (n_frames)
+        spec_batched = spec.unsqueeze(0)  # (1, 64, frames)
+        sampled_ms = sample_spectrogram(spec_batched, n_frames)
+        segment_spectrograms.append(sampled_ms[0])
 
     return segment_spectrograms, audio_segments
 
@@ -359,7 +343,7 @@ def compute_waveform_peaks(filename: str, target_sr: int = 16000, samples_per_pi
 _RESAMPLERS: dict[tuple[int, int], T.Resample] = {}
 
 # Lazily-constructed global GPU mel-spectrogram transform
-_MEL: T.MelSpectrogram | None = None
+_MEL: Optional[T.MelSpectrogram] = None
 
 
 def _get_resampler(orig_sr: int, new_sr: int) -> T.Resample:
@@ -414,7 +398,7 @@ def sample_windows(
     wav: torch.Tensor,
     sr: int,
     win_sec: float = 3.0,
-    positions: List[float] | None = None,
+    positions: Optional[List[float]] = None,
 ) -> torch.Tensor:
     """Slice fixed-length windows from a waveform at given relative positions.
 
@@ -457,7 +441,13 @@ def _init_mel() -> T.MelSpectrogram:
     """Construct and memoise the global GPU MelSpectrogram transform."""
     global _MEL
     if _MEL is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+
         _MEL = T.MelSpectrogram(
             sample_rate=16000,
             n_mels=64,
@@ -478,7 +468,11 @@ def mel_batch(windows: torch.Tensor) -> torch.Tensor:
         Tensor of shape (N, 64, 96) on the same device as the transform.
     """
     mel = _init_mel()
-    # Ensure channel dim for convolution
-    return mel(windows.unsqueeze(1))
+    # Ensure waveform batch resides on same device as the transform's internal window buffer
+    target_device = mel.spectrogram.window.device  # type: ignore[attr-defined]
+    specs = mel(windows.to(target_device).unsqueeze(1))  # (N, C?, 64, T) or (N, 64, T)
+    if specs.dim() == 4:
+        specs = specs.squeeze(1)  # drop channel dim if present
+    return specs
 
 # === End of performance helpers ===
