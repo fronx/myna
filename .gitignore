@@ -3,3 +3,5 @@ venv/
 
 CLAUDE.md
 settings.local.json
+
+data/*

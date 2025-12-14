@@ -6,6 +6,7 @@ import argparse
 import os
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 from vit import SimpleViT # from vit_pytorch import SimpleViT
 import wandb
 
@@ -36,7 +37,7 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace):
             freeze_unfreeze_backbone(model, freeze=False)
 
         train_loss, train_metrics = train_epoch(model, train_loader, criterion, optimizer, epoch, args=args)
-        
+
         if rank == 0:
             test_loss, test_metrics = test(model, test_dataset, criterion, epoch, args=args)
             log_metrics(train_loss, test_loss, train_metrics, test_metrics, best_test_metrics, use_wandb)
@@ -84,24 +85,52 @@ def setup_for_training(rank: int, world_size: int, args: argparse.Namespace):
             reinit=False
         )
         use_wandb = True
-        
+
     # load dataset
-    train_dataset, train_loader = get_dataset(
-        dataroot=os.path.join(args.dataroot, 'train'),
-        args=args,
-        distributed=world_size > 1,
-        rank=rank,
-        world_size=world_size
+    def _make_loader(dataset, drop_last: bool = True):
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
+        loader = DataLoader(
+            dataset=dataset,
+            batch_size=args.batch_size,
+            shuffle=(sampler is None),
+            sampler=sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=drop_last
+        )
+        return loader
+
+    # DJ window dataset: use manifest (samples.jsonl) as the single source of truth.
+    manifest = os.path.join(args.dataroot, 'samples.jsonl')
+    if not os.path.exists(manifest):
+        raise ValueError(f'Manifest not found at {manifest}. Run prepare_dj_dataset.py first.')
+
+    train_dataset = DJWindowDataset(
+        dataroot=args.dataroot,
+        manifest_jsonl=manifest,
+        split='train',
+        frame_size=args.mel_frames,
     )
-    test_dataset, _ = get_dataset(
-        dataroot=os.path.join(args.dataroot, 'test'),
-        args=args,
-        drop_last=False
+    test_dataset = DJWindowDataset(
+        dataroot=args.dataroot,
+        manifest_jsonl=manifest,
+        split='test',
+        frame_size=args.mel_frames,
     )
 
+    # Auto-adjust batch size if larger than dataset
+    if args.batch_size > len(train_dataset):
+        old_bs = args.batch_size
+        args.batch_size = max(1, len(train_dataset) // 2)
+        if rank == 0:
+            print(f'==> Batch size {old_bs} > dataset size {len(train_dataset)}, reducing to {args.batch_size}')
+
+    train_loader = _make_loader(train_dataset, drop_last=True)
+
     if rank == 0:
-        print(f'==> Training dataset contains {len(train_dataset):,} songs.')
-        print(f'==> Testing dataset contains {len(test_dataset):,} songs.')
+        unit = 'tracks'
+        print(f'==> Training dataset contains {len(train_dataset):,} {unit}.')
+        print(f'==> Testing dataset contains {len(test_dataset):,} {unit}.')
         print(f'==> Using {args.device}')
 
     model = SimpleViT(
@@ -158,7 +187,7 @@ def setup_for_training(rank: int, world_size: int, args: argparse.Namespace):
 
     if args.resume_optimizer:
         load_optimizer(optimizer, criterion, args.resume_optimizer)
-        
+
     n_params = sum(p.numel() for p in model.parameters())
     n_active = sum(p.numel() for p in model.parameters() if p.requires_grad)
     active = f'({n_active:,} active)' if n_params != n_active else ''
@@ -177,16 +206,19 @@ def log_metrics(train_loss: float, test_loss: float, train_metrics: dict, test_m
         }
 
         for metric_name, value in train_metrics.items():
-            if metric_name == 'text': continue
+            if metric_name == 'text':
+                continue
             log_dict[f'train/{metric_name}'] = value
         for metric_name, value in test_metrics.items():
-            if metric_name == 'text': continue
+            if metric_name == 'text':
+                continue
             log_dict[f'test/{metric_name}'] = value
-            
+
         wandb.log(log_dict)
 
     for metric_name, value in test_metrics.items():
-        if metric_name == 'text': continue
+        if metric_name == 'text':
+            continue
         if metric_name not in best_test_metrics or value > best_test_metrics[metric_name]:
             best_test_metrics[metric_name] = value
 

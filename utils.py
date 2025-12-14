@@ -19,6 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from tqdm.auto import tqdm
 from vit_pytorch.simple_vit import Transformer
+from typing import Optional, Dict, List, Tuple
 
 
 def parse_args():
@@ -70,7 +71,7 @@ def parse_args():
     parser.add_argument('--ignore_layers', type=str, nargs='*', default=[], help='List of layer names to ignore during loading from checkpoint (default: none)')
     parser.add_argument('--seed', type=int, default=42, help='Seed for deterministic output')
     parser.add_argument('--task_type', type=str, choices=['binary', 'multiclass', 'regression', 'contrastive', 'mae'], required=True, help='Task type for training (binary, multiclass, regression, contrastive, or mae [masked autoencoder])')
-    parser.add_argument('--mask_ratio', type=float, default=None, help='Mask ratio for masked autoencoder task')
+    parser.add_argument('--mask_ratio', type=float, default=0.9, help='Mask ratio for contrastive/MAE (default: 0.9 per Myna paper)')
     parser.add_argument('--train_only_head_epochs', type=int, help='Number of epochs to train only the model head (freeze backbone for this many epochs)')
     parser.add_argument('--local-rank', type=int, help='Local rank (passed in by torchrun)')
     parser.add_argument('--dist_backend', type=str, default='nccl', help='Backend for distributed training (default: NCCL)')
@@ -218,7 +219,122 @@ class MelSpectrogramDataset(Dataset):
             spec = specs if self.n_views > 1 else specs[0]
             
         return i, spec, label
-    
+        
+
+# DJWindowDataset: Dataset for random short mel-spectrogram windows exported per track.
+class DJWindowDataset(Dataset):
+    """Dataset for random short mel-spectrogram windows exported per track.
+
+    This dataset is meant to consume the output of `prepare_dj_dataset.py`.
+
+    Manifest is REQUIRED:
+      - We use `samples.jsonl` as the single source of truth for sample paths, splits, and track_id.
+      - This avoids brittle filename parsing and directory-structure assumptions.
+
+    For contrastive training, each item corresponds to a track_id and yields two different windows
+    from that track when `n_views > 1`.
+    """
+
+    def __init__(
+        self,
+        dataroot: str,
+        manifest_jsonl: str,
+        split: str,
+        frame_size: Optional[int] = None,
+        labeled: bool = False,
+        n_views: int = 2,
+        max_frame_distance: Optional[int] = None,
+    ):
+        super().__init__()
+        self.dataroot = dataroot
+        self.frame_size = frame_size
+        self.max_frame_distance = max_frame_distance
+        self.manifest_jsonl = manifest_jsonl
+        self.split = split
+        self.labeled = labeled
+        self.n_views = n_views
+
+        # Internal indices (track-grouped)
+        self._track_to_files: Dict[str, List[str]] = {}
+        self._tracks: List[str] = []
+
+        self._load_from_manifest(manifest_jsonl)
+
+        # Finalize ordering
+        self._tracks = sorted(self._track_to_files.keys())
+
+    def _load_from_manifest(self, manifest_jsonl: str):
+        # `samples.jsonl` lines are JSON objects with at least: split, sample_path, track_id
+        with open(manifest_jsonl, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get('split') != self.split:
+                    continue
+
+                rel = rec.get('sample_path')
+                tid = rec.get('track_id')
+                if not rel or not tid:
+                    continue
+
+                # sample_path is relative to the dataset root written by prepare_dj_dataset.py
+                fp = os.path.join(self.dataroot, rel)
+                self._track_to_files.setdefault(tid, []).append(fp)
+
+    def __len__(self):
+        return len(self._tracks)
+
+    def _crop_within_window(self, spec: torch.Tensor) -> torch.Tensor:
+        if self.frame_size is None:
+            return spec
+        total_frames = spec.shape[-1]
+        if total_frames < self.frame_size:
+            raise ValueError(
+                f'Spectrogram has fewer frames ({total_frames}) than the requested frame size ({self.frame_size}).'
+            )
+
+        start = random.randint(0, total_frames - self.frame_size)
+        end = start + self.frame_size
+        return spec[..., start:end]
+
+    def _load_one(self, fp: str) -> Tuple[torch.Tensor, int]:
+        with open(fp, 'rb') as f:
+            data = pickle.load(f)
+
+        if self.labeled:
+            spec, label = data
+        else:
+            spec, label = data, 0
+
+        return spec, label
+
+    def __getitem__(self, i: int):
+        tid = self._tracks[i]
+        files = self._track_to_files[tid]
+
+        if self.n_views > 1:
+            # Sample two different windows from the same track when possible
+            if len(files) >= 2:
+                fp_a, fp_b = random.sample(files, 2)
+            else:
+                fp_a = files[0]
+                fp_b = files[0]
+
+            spec_a, label = self._load_one(fp_a)
+            spec_b, _ = self._load_one(fp_b)
+
+            spec_a = self._crop_within_window(spec_a)
+            spec_b = self._crop_within_window(spec_b)
+
+            return i, [spec_a, spec_b], label
+
+        # n_views == 1
+        fp = random.choice(files)
+        spec, label = self._load_one(fp)
+        spec = self._crop_within_window(spec)
+        return i, spec, label
 
 @torch.no_grad()
 def predict(model: nn.Module, spec: torch.Tensor, chunk_size: int):
