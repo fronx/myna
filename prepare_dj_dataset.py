@@ -245,7 +245,7 @@ if __name__ == '__main__':
     parser.add_argument('output_dir', help='Where to save processed dataset')
     parser.add_argument('--train-split', type=float, default=0.8)
     parser.add_argument('--clip-seconds', type=float, default=3.0, help='Duration of each sampled window in seconds (default: 3.0)')
-    parser.add_argument('--samples-per-track', type=int, default=12, help='Number of windows to sample per track (default: 12)')
+    parser.add_argument('--samples-per-track', type=int, default=6, help='Number of windows to sample per track (default: 6)')
     parser.add_argument('--n-bins', type=int, default=8, help='Number of coarse time bins for stratified sampling (default: 8)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducible sampling (default: 42)')
     args = parser.parse_args()
