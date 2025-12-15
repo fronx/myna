@@ -698,6 +698,30 @@ def get_criterion(args: argparse.Namespace, N: int):
         raise Exception(f'Task type {args.task_type} not supported')
 
 
+def get_projection_head_config(num_tracks: int, clips_per_track: int = 10) -> list[str]:
+    '''
+    Calculate appropriate 2-layer MLP projection head for contrastive learning.
+    Returns [d_hid, d_proj] as strings for add_proj_head().
+
+    Based on effective data size to control overfitting risk:
+    - Small (<5k effective clips): d_proj=128, d_hid=512
+    - Medium (5k-50k): d_proj=256, d_hid=1024
+    - Large (>50k): d_proj=512, d_hid=2048
+
+    Effective clips = num_tracks * clips_per_track (per epoch)
+    '''
+    effective_clips = num_tracks * clips_per_track
+
+    if effective_clips < 5000:
+        d_proj, d_hid = 128, 512
+    elif effective_clips < 50000:
+        d_proj, d_hid = 256, 1024
+    else:
+        d_proj, d_hid = 512, 2048
+
+    return [str(d_hid), str(d_proj)]
+
+
 def seed_everything(seed: int):
     # Seed the built-in random module
     random.seed(seed)
@@ -761,6 +785,14 @@ def infer_architecture_from_checkpoint(checkpoint_path: str, device: str = 'cpu'
             # For hybrid mode with area 256: use (128, 2) to capture more time context
             additional_patch_size = (128, 2) if patch_area == 256 else (patch_area, 1)
 
+    # Infer projection head from linear_head layers
+    proj_head = None
+    linear_head_keys = sorted([k for k in ckpt if k.startswith('linear_head.') and k.endswith('.weight')])
+    if linear_head_keys:
+        proj_dims = [str(ckpt[key].shape[0]) for key in linear_head_keys]
+        if proj_dims:
+            proj_head = proj_dims
+
     return {
         'dim': dim,
         'depth': depth,
@@ -769,6 +801,7 @@ def infer_architecture_from_checkpoint(checkpoint_path: str, device: str = 'cpu'
         'dim_head': dim_head,
         'has_additional_patch_size': has_additional_patch_size,
         'additional_patch_size': additional_patch_size,
+        'proj_head': proj_head,
     }
 
 

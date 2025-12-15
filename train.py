@@ -161,6 +161,18 @@ def setup_for_training(rank: int, world_size: int, args: argparse.Namespace):
         additional_patch_size=args.additional_patch_size
     )
 
+    # Auto-calculate projection head for contrastive learning if not specified
+    if args.task_type.lower() == 'contrastive' and not args.proj_head:
+        if args.resume and inferred.get('proj_head'):
+            args.proj_head = inferred['proj_head']
+            if rank == 0:
+                print(f'==> Using projection head from checkpoint: {"->".join(args.proj_head)}')
+        else:
+            args.proj_head = get_projection_head_config(len(train_dataset))
+            if rank == 0:
+                d_hid, d_proj = args.proj_head
+                print(f'==> Auto-calculated projection head: {d_hid}->{d_proj} (based on {len(train_dataset)} tracks)')
+
     if args.proj_head:
         add_proj_head(model, args.proj_head)
 
