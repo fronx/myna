@@ -57,11 +57,11 @@ def build_train_command(train_args: list[str], dataroot: str, resume_path: Optio
     """Build the train.py command from arguments."""
     args_str = " ".join(train_args)
     # Architecture is auto-inferred from checkpoint when --resume is used
-    cmd = f"cd /workspace && python train.py --dataroot {dataroot} --task_type contrastive"
+    cmd = f"cd /workspace && python train.py --dataroot {dataroot} --task_type contrastive --batch_size 256 --learning_rate 1e-5 --train_only_head_epochs 5"
     if resume_path:
         cmd += f" --resume {resume_path}"
     # Save checkpoints to volume, every N epochs
-    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 2"
+    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 10"
     if args_str:
         cmd += f" {args_str}"
     return cmd
