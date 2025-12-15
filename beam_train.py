@@ -60,8 +60,8 @@ def build_train_command(train_args: list[str], dataroot: str, resume_path: Optio
     cmd = f"cd /workspace && python train.py --dataroot {dataroot} --task_type contrastive"
     if resume_path:
         cmd += f" --resume {resume_path}"
-    # Always save checkpoints to volume, every 10 epochs
-    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 10"
+    # Save checkpoints to volume, every N epochs
+    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 2"
     if args_str:
         cmd += f" {args_str}"
     return cmd
