@@ -133,6 +133,21 @@ def setup_for_training(rank: int, world_size: int, args: argparse.Namespace):
         print(f'==> Testing dataset contains {len(test_dataset):,} {unit}.')
         print(f'==> Using {args.device}')
 
+    # Infer architecture from checkpoint if resuming
+    if args.resume:
+        inferred = infer_architecture_from_checkpoint(args.resume, args.device)
+        if rank == 0:
+            print(f'==> Inferred architecture from checkpoint: dim={inferred["dim"]}, depth={inferred["depth"]}, heads={inferred["heads"]}, mlp_dim={inferred["mlp_dim"]}')
+        args.dim = inferred['dim']
+        args.depth = inferred['depth']
+        args.heads = inferred['heads']
+        args.mlp_dim = inferred['mlp_dim']
+        args.dim_head = inferred['dim_head']
+        if inferred['additional_patch_size'] and not args.additional_patch_size:
+            args.additional_patch_size = inferred['additional_patch_size']
+            if rank == 0:
+                print(f'==> Checkpoint has hybrid embeddings, setting additional_patch_size={args.additional_patch_size}')
+
     model = SimpleViT(
         image_size=(args.n_mels, args.mel_frames),
         channels=1,

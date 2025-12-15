@@ -722,22 +722,86 @@ def save_model(model: nn.Module, checkpoint_dir: str, filename: str):
     torch.save(model.state_dict(), checkpoint_path)
 
 
+def infer_architecture_from_checkpoint(checkpoint_path: str, device: str = 'cpu') -> dict:
+    '''
+    Infer model architecture parameters from checkpoint weights.
+    Returns dict with: dim, depth, heads, mlp_dim, dim_head, has_additional_patch_size
+    '''
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Infer depth from highest transformer layer index
+    layer_indices = [int(k.split('.')[2]) for k in ckpt if k.startswith('transformer.layers.')]
+    depth = max(layer_indices) + 1 if layer_indices else 6
+
+    # Infer dim from transformer norm weight
+    dim = ckpt['transformer.norm.weight'].shape[0] if 'transformer.norm.weight' in ckpt else 256
+
+    # Infer mlp_dim from FFN layer (transformer.layers.0.1.net.1.weight has shape [mlp_dim, dim])
+    mlp_key = 'transformer.layers.0.1.net.1.weight'
+    mlp_dim = ckpt[mlp_key].shape[0] if mlp_key in ckpt else 1024
+
+    # Infer dim_head and heads from attention (to_qkv has shape [3 * heads * dim_head, dim])
+    qkv_key = 'transformer.layers.0.0.to_qkv.weight'
+    if qkv_key in ckpt:
+        qkv_dim = ckpt[qkv_key].shape[0]  # 3 * heads * dim_head
+        # dim_head is typically 64, infer heads from that
+        dim_head = 64
+        heads = qkv_dim // (3 * dim_head)
+    else:
+        heads, dim_head = 6, 64
+
+    # Check for additional patch embedding (hybrid mode) and infer its size
+    has_additional_patch_size = any(k.startswith('to_patch_embedding_b') for k in ckpt)
+    additional_patch_size = None
+    if has_additional_patch_size:
+        # Infer from batch norm features: patch_h * patch_w = features (for 1 channel)
+        bn_key = 'to_patch_embedding_b.1.weight'
+        if bn_key in ckpt:
+            patch_area = ckpt[bn_key].shape[0]
+            # For hybrid mode with area 256: use (128, 2) to capture more time context
+            additional_patch_size = (128, 2) if patch_area == 256 else (patch_area, 1)
+
+    return {
+        'dim': dim,
+        'depth': depth,
+        'heads': heads,
+        'mlp_dim': mlp_dim,
+        'dim_head': dim_head,
+        'has_additional_patch_size': has_additional_patch_size,
+        'additional_patch_size': additional_patch_size,
+    }
+
+
 def load_model(model: nn.Module, checkpoint_path: str, device: str, ignore_layers: list, verbose: bool):
     '''
-    Load model from checkpoint. Ignores (does not load) weights for 
+    Load model from checkpoint. Ignores (does not load) weights for
     layers whose names start with any string in ignore_layers.
+    Warns if checkpoint has weights that won't be loaded due to architecture mismatch.
     '''
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     filtered_state_dict = {
-        k: v for k, v in checkpoint.items() 
+        k: v for k, v in checkpoint.items()
         if not any(k.startswith(layer) for layer in ignore_layers)
     }
 
+    # Check for architecture mismatches before loading
+    model_keys = set(model.state_dict().keys())
+    ckpt_keys = set(filtered_state_dict.keys())
+    missing_in_model = ckpt_keys - model_keys
+
+    if missing_in_model and verbose:
+        # Group by prefix for cleaner output
+        prefixes = set(k.split('.')[0] for k in missing_in_model)
+        print(f'==> WARNING: Checkpoint has {len(missing_in_model)} weights not in model (prefixes: {", ".join(sorted(prefixes))})')
+        print(f'==> These weights will be IGNORED. Use infer_architecture_from_checkpoint() to match architecture.')
+
     model.load_state_dict(filtered_state_dict, strict=False)
 
-    if ignore_layers and verbose:
-        print(f'==> Loaded model from {checkpoint_path}, ignoring layers: {", ".join(ignore_layers)}')
+    if verbose:
+        print(f'==> Loaded model from {checkpoint_path}')
+        if ignore_layers:
+            print(f'==> Ignored layers: {", ".join(ignore_layers)}')
 
 
 def save_optimizer(optimizer: optim.Optimizer, criterion: nn.Module, checkpoint_dir: str, filename: str):
