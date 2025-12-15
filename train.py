@@ -32,6 +32,16 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace):
         model = DDP(model, device_ids=[rank], output_device=rank)
 
     best_test_metrics = {}
+    print(f'DEBUG: About to save epoch 0 checkpoint. rank={rank}, checkpoint_dir={args.checkpoint_dir}')
+
+    # Save epoch 0 checkpoint (baseline before any training)
+    if rank == 0 and args.checkpoint_dir:
+        print(f'==> Saving baseline checkpoint to {args.checkpoint_dir}...')
+        save_model(model, args.checkpoint_dir, 'model_epoch_0.pth')
+        print(f'==> Saved baseline checkpoint: model_epoch_0.pth')
+    else:
+        print(f'==> Skipping baseline checkpoint: rank={rank}, checkpoint_dir={args.checkpoint_dir}')
+
     for epoch in range(args.resume_epochs, args.epochs):
         if epoch == args.train_only_head_epochs:
             freeze_unfreeze_backbone(model, freeze=False)
@@ -124,6 +134,8 @@ def setup_for_training(rank: int, world_size: int, args: argparse.Namespace):
         args.batch_size = max(1, len(train_dataset) // 2)
         if rank == 0:
             print(f'==> Batch size {old_bs} > dataset size {len(train_dataset)}, reducing to {args.batch_size}')
+    else:
+        print(f'==> Using batch size {args.batch_size}')
 
     train_loader = _make_loader(train_dataset, drop_last=True)
 
