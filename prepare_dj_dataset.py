@@ -287,7 +287,7 @@ def process_dj_collection(
                     output_file = os.path.join(output_dir, split_name, out_name)
 
                     with open(output_file, 'wb') as f:
-                        pickle.dump(spec, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(spec.half(), f, protocol=pickle.HIGHEST_PROTOCOL)
 
                     rec = {
                         'split': split_name,
