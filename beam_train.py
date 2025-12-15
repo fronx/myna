@@ -61,7 +61,7 @@ def build_train_command(train_args: list[str], dataroot: str, resume_path: Optio
     if resume_path:
         cmd += f" --resume {resume_path}"
     # Save checkpoints to volume, every N epochs
-    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 10"
+    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 50"
     if args_str:
         cmd += f" {args_str}"
     return cmd
