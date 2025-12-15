@@ -41,22 +41,36 @@ def download_preview_url(preview_url: str) -> str:
             return f.name
 
 
-def load_apple_music_tracks(db_path: str) -> List[Tuple[str, str, str, str]]:
-    """Load Apple Music tracks with preview URLs from MusicMapper database.
+def load_tracks_from_musicmapper(db_path: str) -> Tuple[List[Tuple[str, str, str, str]], List[Tuple[str, str, str, str]]]:
+    """Load tracks from MusicMapper database.
 
-    Returns list of (track_id, title, artist, preview_url) tuples.
+    Returns:
+        (local_tracks, cloud_tracks) where each is a list of (track_id, title, artist, path_or_url) tuples.
     """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+
+    # Local tracks with file paths
+    cursor.execute("""
+        SELECT t.track_id, t.title, t.artist, f.file_path
+        FROM tracks t
+        JOIN files f ON t.track_id = f.track_id
+        WHERE f.file_path IS NOT NULL
+    """)
+    local_tracks = cursor.fetchall()
+
+    # Apple Music tracks without local files (cloud-only)
     cursor.execute("""
         SELECT t.track_id, t.title, t.artist, am.preview_url
         FROM tracks t
         JOIN apple_music_tracks am ON t.track_id = am.track_id
-        WHERE am.preview_url IS NOT NULL
+        LEFT JOIN files f ON t.track_id = f.track_id
+        WHERE am.preview_url IS NOT NULL AND f.file_path IS NULL
     """)
-    tracks = cursor.fetchall()
+    cloud_tracks = cursor.fetchall()
+
     conn.close()
-    return tracks
+    return local_tracks, cloud_tracks
 
 
 def stable_track_id(path: str) -> str:
@@ -191,13 +205,16 @@ def process_dj_collection(
             tid = stable_track_id(f)
             all_tracks.append((tid, Path(f).stem, f, False))
 
-    # Apple Music previews from MusicMapper database
+    # Tracks from MusicMapper database (both local files and Apple Music previews)
     if musicmapper_db:
         if not os.path.exists(musicmapper_db):
             raise FileNotFoundError(f"MusicMapper database not found: {musicmapper_db}")
-        am_tracks = load_apple_music_tracks(musicmapper_db)
-        print(f"Found {len(am_tracks)} Apple Music tracks with previews")
-        for track_id, title, artist, preview_url in am_tracks:
+        db_local, db_cloud = load_tracks_from_musicmapper(musicmapper_db)
+        print(f"Found {len(db_local)} local tracks and {len(db_cloud)} Apple Music previews in database")
+        for track_id, title, artist, file_path in db_local:
+            display = f"{artist} - {title}" if artist else title
+            all_tracks.append((track_id, display, file_path, False))
+        for track_id, title, artist, preview_url in db_cloud:
             display = f"{artist} - {title}" if artist else title
             all_tracks.append((track_id, display, preview_url, True))
 
@@ -240,12 +257,14 @@ def process_dj_collection(
                 else:
                     duration_sec = float(librosa.get_duration(filename=audio_file))
 
+                # Hash the track ID to get a stable integer seed (handles UUIDs and hex strings)
+                tid_hash = int(hashlib.md5(tid.encode()).hexdigest()[:8], 16)
                 offsets = choose_offsets(
                     duration_sec=duration_sec,
                     clip_sec=clip_seconds,
                     samples_per_track=samples_per_track,
                     n_bins=n_bins,
-                    seed=(seed ^ int(tid, 16)) & 0xFFFFFFFF
+                    seed=(seed ^ tid_hash) & 0xFFFFFFFF
                 )
 
                 safe_stem = display_name.replace('/', '_').replace('\\', '_')[:80]
