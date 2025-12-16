@@ -524,8 +524,9 @@ def train_epoch(model: nn.Module, train_loader: DataLoader, criterion: nn.Module
             inputs = torch.stack(inputs, dim=0)
         if args.log_mel: 
             inputs = torch.log1p(inputs)
+        model_dtype = next(model.parameters()).dtype
         indices = indices.to(args.device)
-        inputs = inputs.to(args.device)
+        inputs = inputs.to(args.device, dtype=model_dtype)
         labels = labels.to(args.device)
 
         optimizer.zero_grad()
@@ -582,7 +583,8 @@ def test(model: nn.Module, test_dataset: Dataset, criterion: nn.Module, epoch: i
                 inputs = torch.log1p(inputs)
             if not isinstance(labels, torch.Tensor):
                 labels = torch.tensor(labels)
-            inputs = inputs.to(args.device)
+            model_dtype = next(model.parameters()).dtype
+            inputs = inputs.to(args.device, dtype=model_dtype)
             labels = labels.to(args.device)
 
             outputs = predict(model, inputs, chunk_size=args.mel_frames)
@@ -945,7 +947,8 @@ def output_mae_examples(model: nn.Module, test_dataset: Dataset, epoch: int, arg
     n_imgs = 10
 
     indices = torch.randint(0, len(test_dataset), (n_imgs,))
-    inputs = torch.stack([test_dataset[i][1] for i in indices]).to(args.device)
+    model_dtype = next(model.parameters()).dtype
+    inputs = torch.stack([test_dataset[i][1] for i in indices]).to(args.device, dtype=model_dtype)
     outputs, _ = compute_loss(model, inputs, None, None, nn.MSELoss(), args, return_mae_outputs=True)
 
     img_dir = os.path.join(args.checkpoint_dir, 'outputs', f'epoch_{epoch:03}')
