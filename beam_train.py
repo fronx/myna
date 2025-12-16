@@ -2,7 +2,7 @@
 Beam Cloud GPU Training Script for Myna
 
 Usage:
-    python beam_train.py --dataroot data/dj_collection/ [train.py args...]
+    python beam_train.py --dataset my_dataset --dataroot data/dj_collection/ [train.py args...]
 
 Data is automatically uploaded to a persistent volume on first run.
 """
@@ -41,6 +41,8 @@ def parse_beam_args():
     parser = argparse.ArgumentParser(description="Run training on Beam Cloud GPU")
     parser.add_argument("--gpu", type=str, default="RTX4090", choices=["A10G", "RTX4090", "H100"],
                         help="GPU type to use")
+    parser.add_argument("--dataset", type=str, required=True,
+                        help="Name for the dataset (becomes a folder on cloud storage)")
     parser.add_argument("--dataroot", type=str, required=True,
                         help="Path to dataset (will be uploaded if local)")
     parser.add_argument("--dry-run", action="store_true",
@@ -53,7 +55,7 @@ def parse_beam_args():
     return args, train_args
 
 
-def build_train_command(train_args: list[str], dataroot: str, resume_path: Optional[str] = None) -> str:
+def build_train_command(train_args: list[str], dataroot: str, dataset_name: str, resume_path: Optional[str] = None) -> str:
     """Build the train.py command from arguments."""
     args_str = " ".join(train_args)
     # Architecture is auto-inferred from checkpoint when --resume is used
@@ -61,13 +63,13 @@ def build_train_command(train_args: list[str], dataroot: str, resume_path: Optio
     if resume_path:
         cmd += f" --resume {resume_path}"
     # Save checkpoints to volume, every N epochs
-    cmd += " --checkpoint_dir /volumes/myna-checkpoints --checkpoint_epochs 50"
+    cmd += f" --checkpoint_dir /volumes/myna-checkpoints/{dataset_name} --checkpoint_epochs 50"
     if args_str:
         cmd += f" {args_str}"
     return cmd
 
 
-def upload_checkpoint_if_needed(local_checkpoint: str):
+def upload_checkpoint_if_needed(local_checkpoint: str, dataset_name: str):
     """Upload pretrained checkpoint to volume if not already present."""
     import subprocess
 
@@ -75,28 +77,28 @@ def upload_checkpoint_if_needed(local_checkpoint: str):
         return None
 
     filename = os.path.basename(local_checkpoint)
-    volume_path = f"/volumes/myna-checkpoints/{filename}"
+    volume_path = f"/volumes/myna-checkpoints/{dataset_name}/{filename}"
 
     # Check if already uploaded (list directory and look for filename)
-    result = subprocess.run(["beam", "ls", "myna-checkpoints/"], capture_output=True, text=True)
+    result = subprocess.run(["beam", "ls", f"myna-checkpoints/{dataset_name}/"], capture_output=True, text=True)
     if result.returncode == 0 and filename in result.stdout:
         print(f"Checkpoint already on volume: {volume_path}")
         return volume_path
 
     print(f"Uploading checkpoint {local_checkpoint}...")
-    result = subprocess.run(["beam", "cp", local_checkpoint, f"beam://myna-checkpoints/{filename}"])
+    result = subprocess.run(["beam", "cp", local_checkpoint, f"beam://myna-checkpoints/{dataset_name}/{filename}"])
     if result.returncode != 0:
         raise RuntimeError("Checkpoint upload failed")
     print(f"Checkpoint uploaded to {volume_path}")
     return volume_path
 
 
-def upload_archive_if_needed(sb, local_dataroot: str):
+def upload_archive_if_needed(sb, local_dataroot: str, dataset_name: str):
     """Upload dataset archive to volume if not already present."""
     import subprocess
     import tarfile
 
-    volume_tar = "/volumes/myna-data/data.tar.gz"
+    volume_tar = f"/volumes/myna-data/{dataset_name}/data.tar.gz"
 
     # Check if archive exists on volume
     check = sb.process.run_code(f"""
@@ -119,15 +121,15 @@ print(f"archive:{{os.path.exists('{volume_tar}')}}")
     tar_size_mb = os.path.getsize(local_tar) / (1024 * 1024)
     print(f"Uploading {tar_size_mb:.1f} MB archive via beam cp...")
 
-    result = subprocess.run(["beam", "cp", local_tar, "beam://myna-data/data.tar.gz"])
+    result = subprocess.run(["beam", "cp", local_tar, f"beam://myna-data/{dataset_name}/data.tar.gz"])
     if result.returncode != 0:
         raise RuntimeError("beam cp failed")
     print("Archive uploaded")
 
 
-def extract_to_local(sb, local_data_path: str):
+def extract_to_local(sb, local_data_path: str, dataset_name: str):
     """Extract archive from volume to local disk (fast). Returns path to use for training."""
-    volume_tar = "/volumes/myna-data/data.tar.gz"
+    volume_tar = f"/volumes/myna-data/{dataset_name}/data.tar.gz"
 
     # Check if already extracted
     check = sb.process.run_code(f"""
@@ -150,15 +152,15 @@ print(f"count:{{count}}")
     print("Extraction complete")
 
 
-def run_training(gpu: str, dataroot: str, checkpoint: str, train_args: list[str], dry_run: bool = False):
+def run_training(gpu: str, dataset: str, dataroot: str, checkpoint: str, train_args: list[str], dry_run: bool = False):
     """Create sandbox and run training."""
 
     # Use local disk for training data (fast), volume only stores the archive
     local_data_path = "/tmp/myna-data"
 
     # Upload checkpoint to volume and get the volume path
-    resume_path = upload_checkpoint_if_needed(checkpoint)
-    train_cmd = build_train_command(train_args, local_data_path, resume_path)
+    resume_path = upload_checkpoint_if_needed(checkpoint, dataset)
+    train_cmd = build_train_command(train_args, local_data_path, dataset, resume_path)
 
     if dry_run:
         print("=== DRY RUN ===")
@@ -203,8 +205,8 @@ def run_training(gpu: str, dataroot: str, checkpoint: str, train_args: list[str]
             print(f"  Warning: {local_file} not found, skipping")
 
     # Upload archive to volume, then extract to local disk
-    upload_archive_if_needed(sb, dataroot)
-    extract_to_local(sb, local_data_path)
+    upload_archive_if_needed(sb, dataroot, dataset)
+    extract_to_local(sb, local_data_path, dataset)
 
     # Check GPU availability
     print("\nVerifying GPU...")
@@ -262,8 +264,8 @@ if torch.cuda.is_available():
     print("=" * 60)
     print(f"Training finished with exit code: {exit_code}")
 
-    print("\nCheckpoints saved to volume 'myna-checkpoints'")
-    print("Download with: beam cp beam://myna-checkpoints/model_epoch_N.pth .")
+    print(f"\nCheckpoints saved to volume 'myna-checkpoints/{dataset}'")
+    print(f"Download with: beam cp beam://myna-checkpoints/{dataset}/model_epoch_N.pth .")
     print("Done. Sandbox still running - rerun to continue training.")
 
 
@@ -271,6 +273,7 @@ def main():
     args, train_args = parse_beam_args()
     run_training(
         gpu=args.gpu,
+        dataset=args.dataset,
         dataroot=args.dataroot,
         checkpoint=args.checkpoint,
         train_args=train_args,
